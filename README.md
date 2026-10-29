@@ -126,3 +126,13 @@ keys — have been parameterized or replaced with placeholders (e.g.
 Behavior and measurements are unchanged. Audio fixtures (`tests/*.wav`)
 from the original test runs are not included; the test scripts regenerate
 what they need.
+
+## License
+
+Vibherpunk Audio is free for personal and other noncommercial use under the
+PolyForm Noncommercial License 1.0.0 — see [LICENSE](LICENSE).
+
+Commercial use of any kind is **not** covered by that license. That includes
+using the software inside a business or in a product, even if the software
+itself is given away for free. Commercial use requires a separate commercial
+license from the copyright holder. To ask about one, open an issue on this repository.
