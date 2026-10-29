@@ -1,0 +1,9 @@
+import scipy.io.wavfile
+from pocket_tts import TTSModel
+m = TTSModel.load_model()
+st = m.get_state_for_audio_prompt("george")
+text = "Please have Hermes list the names of the profiles it has on this machine. Take your time. I want the actual list from Hermes itself."
+a = m.generate_audio(st, text)
+pcm = (a.numpy().clip(-1, 1) * 32767).astype("int16")
+scipy.io.wavfile.write("tests/utt_work3.wav", m.sample_rate, pcm)
+print("SYNTH work3", len(pcm) / m.sample_rate)

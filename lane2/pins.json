@@ -1,0 +1,7 @@
+{
+  "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+  "tokenizer_config.json": "4397cc477eb6d79715ccd2000accd6b3531928f30029665832fa1b255f24d2b9",
+  "model_dir": "mlx-community/Qwen3-4B-Instruct-2507-4bit/snapshots/50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
+  "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+  "mlx_lm": "0.32.2"
+}

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+logs/
+logs-mobile/
+*.bak*
+.env
+*.wav
+*.raw
+*.webm
+.DS_Store

@@ -1,0 +1,54 @@
+# Vibherpunk Audio — Hermes configuration fragment (template).
+#
+# Merge these sections into ~/.hermes/config.yaml of the profile the
+# voice bot will use as its back office (the reference build uses the
+# default profile). Substitute the {{PLACEHOLDERS}}. Everything else
+# in the file is Hermes' own business — this build touches only what
+# is below.
+
+# The back office worker: a full Hermes agent profile. The reference
+# build runs its worker on DeepSeek via an OpenCode Go subscription
+# endpoint. Any provider/model the human's Hermes supports can sit
+# here — the voice bot only requires that the gateway's agent
+# endpoint answers (see INSTALL-FOR-AGENTS.md §0, worker contract).
+model:
+  default: '{{WORKER_MODEL}}'
+  provider: '{{WORKER_PROVIDER}}'
+  base_url: '{{WORKER_BASE_URL}}'
+  api_mode: chat_completions
+
+# The gateway's API server must be enabled — the voice bot reaches
+# the worker at http://127.0.0.1:8642/v1 with API_SERVER_KEY.
+platforms:
+  api_server:
+    enabled: true
+
+# Pocket TTS provider entry. voice_compatible: true is REQUIRED for
+# the voice app to use Pocket through Hermes' provider plumbing;
+# without it the voice is silently unavailable. The voice is a
+# pocket-tts catalog name (reference: azelma; also: eve and others
+# bundled with the pocket-tts package).
+tts:
+  provider: pocket
+  providers:
+    pocket:
+      type: command
+      output_format: wav
+      voice_compatible: true
+      voice: '{{VOICE}}'
+      model: pocket-tts
+
+# If the human also uses the Hermes desktop app on this machine,
+# its own wake word must be OFF or the two wake systems double-fire.
+# The voice app does its own wake-word listening.
+wake_word:
+  enabled: false
+
+# Hermes' own local STT settings (desktop surfaces). The language
+# must be an ISO code ('en') — a full word ('English') is rejected
+# by the local recognizer.
+stt:
+  enabled: true
+  language: en
+  local:
+    language: en

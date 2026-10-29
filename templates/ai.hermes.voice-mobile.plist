@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Vibherpunk Audio — mobile transport service.
+     Substitute {{APP_DIR}} (absolute path of the cloned repo) before loading.
+     Install to: ~/Library/LaunchAgents/ai.hermes.voice-mobile.plist -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.voice-mobile</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>{{APP_DIR}}/run_mobile.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>{{APP_DIR}}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>{{APP_DIR}}/logs-mobile/launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{APP_DIR}}/logs-mobile/launchd.err.log</string>
+</dict>
+</plist>

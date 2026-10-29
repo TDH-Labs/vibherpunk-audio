@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Vibherpunk Audio — desk bot service.
+     Substitute {{APP_DIR}} (absolute path of the cloned repo) before loading.
+     Install to: ~/Library/LaunchAgents/ai.hermes.voice.plist -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.voice</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>{{APP_DIR}}/run.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>{{APP_DIR}}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{APP_DIR}}/logs/launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{APP_DIR}}/logs/launchd.err.log</string>
+</dict>
+</plist>

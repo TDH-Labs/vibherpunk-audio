@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Vibherpunk Audio — TURN relay (coturn) for the mobile WebRTC transport.
+     Substitute {{APP_DIR}} and {{HOME}} before loading.
+     Install to: ~/Library/LaunchAgents/ai.hermes.turn.plist
+     Requires: turnserver.conf installed at ~/.hermes/turnserver.conf
+     (see templates/turnserver.conf). -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.turn</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/turnserver</string>
+		<string>-c</string>
+		<string>{{HOME}}/.hermes/turnserver.conf</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{APP_DIR}}/logs-mobile/turn.launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{APP_DIR}}/logs-mobile/turn.launchd.err.log</string>
+</dict>
+</plist>

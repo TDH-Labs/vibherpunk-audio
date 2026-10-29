@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vibherpunk Audio">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<title>Vibherpunk Audio</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 18px calc(24px + env(safe-area-inset-bottom));
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    background: #101418; color: #e8ecef; min-height: 100dvh;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  h1 { font-size: 22px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .sub { color: #9aa7b1; font-size: 14px; margin-top: -12px; }
+  #status {
+    align-self: flex-start; padding: 7px 14px; border-radius: 999px;
+    background: #1d242c; border: 1px solid #2c3641; font-size: 15px;
+  }
+  #status.live { border-color: #2e7d4f; }
+  #status.busy { border-color: #a67c2e; }
+  #status.error { border-color: #b0402f; }
+  button {
+    font: inherit; border: 0; border-radius: 14px; cursor: pointer;
+    padding: 16px 20px; font-size: 17px; font-weight: 600;
+  }
+  #connectBtn { background: #2e7d4f; color: #fff; width: 100%; padding: 20px; font-size: 19px; }
+  #connectBtn.on { background: #b0402f; }
+  #connectBtn:disabled { opacity: .5; }
+  .row { display: flex; gap: 10px; }
+  .row button { flex: 1; background: #1d242c; color: #e8ecef; border: 1px solid #2c3641; }
+  .row button[aria-pressed="true"] { background: #37424e; }
+  .meterWrap { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #9aa7b1; }
+  .meter { flex: 1; height: 8px; background: #1d242c; border-radius: 4px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0%; background: #4caf7d; transition: width 60ms linear; }
+  #log {
+    flex: 1; overflow-y: auto; background: #0b0e11; border: 1px solid #232b33;
+    border-radius: 12px; padding: 12px 14px; font-size: 14px; line-height: 1.55;
+    color: #c6cfd6; white-space: pre-wrap; word-break: break-word;
+  }
+  .note { color: #77828c; font-size: 13px; line-height: 1.5; }
+  #accessPanel { background: #161d24; border: 1px solid #2c3641; border-radius: 12px; padding: 14px; display: none; flex-direction: column; gap: 10px; }
+  #accessPanel.show { display: flex; }
+  #accessPanel label { font-size: 14px; color: #c6cfd6; line-height: 1.45; }
+  #accessInput { font: inherit; font-size: 15px; padding: 12px; border-radius: 10px; border: 1px solid #2c3641; background: #0b0e11; color: #e8ecef; width: 100%; }
+  #accessRow { display: flex; gap: 10px; }
+  #accessRow button { flex: 1; padding: 13px 10px; font-size: 15px; }
+  #saveAccessBtn { background: #2e7d4f; color: #fff; }
+  #clearAccessBtn { background: #1d242c; color: #e8ecef; border: 1px solid #2c3641; }
+  .linkBtn { background: none; border: 0; color: #77828c; font-size: 13px; text-align: left; padding: 0; cursor: pointer; text-decoration: underline; font-weight: 400; }
+</style>
+</head>
+<body>
+  <h1>Vibherpunk Audio</h1>
+  <p class="sub">Talk from your phone — same voice, same brain as the desk.</p>
+  <div id="status">Disconnected</div>
+  <div id="accessPanel">
+    <label for="accessInput">This copy of the app needs its access link once. Paste the full link (or just the token) here - it is stored only on this device.</label>
+    <input id="accessInput" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste access link or token">
+    <div id="accessRow">
+      <button id="saveAccessBtn">Save access</button>
+      <button id="clearAccessBtn">Remove saved access</button>
+    </div>
+  </div>
+  <button id="connectBtn">Tap to talk</button>
+  <div class="row">
+    <button id="muteBtn" aria-pressed="false" disabled>Mute mic</button>
+  </div>
+  <div class="meterWrap"><span>You</span><div class="meter"><div id="micMeter"></div></div></div>
+  <div class="meterWrap"><span>Vibherpunk</span><div class="meter"><div id="botMeter"></div></div></div>
+  <div id="log" aria-live="polite"></div>
+  <p class="note">If you disconnect while a job is running, the result is held
+  and you will hear it first when you reconnect. Keep this tab in
+  the foreground while talking; iOS suspends audio in background tabs.</p>
+  <button id="accessBtn" class="linkBtn">Access settings</button>
+  <audio id="remoteAudio" autoplay playsinline></audio>
+
+<script>
+"use strict";
+// ---- token bootstrap: ?token=... is stored locally, then stripped from the URL
+(function () {
+  const q = new URLSearchParams(location.search);
+  const t = q.get("token");
+  if (t) {
+    localStorage.setItem("hv-token", t);
+    q.delete("token");
+    const clean = location.pathname + (q.toString() ? "?" + q.toString() : "");
+    history.replaceState(null, "", clean);
+  }
+})();
+const token = () => localStorage.getItem("hv-token") || "";
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), logEl = $("log"), connectBtn = $("connectBtn"),
+      muteBtn = $("muteBtn"), remoteAudio = $("remoteAudio"),
+      accessPanel = $("accessPanel"), accessInput = $("accessInput");
+
+const debug = { events: [], marks: {}, connectStartedAt: null, firstRemoteAudioAt: null };
+function mark(name) { debug.marks[name] = performance.now(); }
+function logLine(text) {
+  debug.events.push({ t: performance.now(), text });
+  const div = document.createElement("div");
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || "";
+}
+
+// ---- access setup: an installed PWA has its own storage, separate from
+// the browser, so it may never see the ?token= link the browser used. The
+// panel lets the user paste the link once, inside the app itself.
+function parseAccessInput(raw) {
+  const s = (raw || "").trim();
+  if (!s) return "";
+  try {
+    const t = new URL(s).searchParams.get("token");
+    if (t) return t.trim();
+  } catch (e) { /* not a URL: fall through to raw-token handling */ }
+  const m = s.match(/token=([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  return s;
+}
+function refreshAccessUi() {
+  const has = !!token();
+  accessPanel.classList.toggle("show", !has || accessPanel.dataset.open === "1");
+  if (!has) setStatus("Access needed - paste the full link once, below", "error");
+}
+function saveAccess() {
+  const t = parseAccessInput(accessInput.value);
+  if (!t || t.length < 16) {
+    setStatus("That does not look like an access token - paste the full link", "error");
+    return;
+  }
+  localStorage.setItem("hv-token", t);
+  accessInput.value = "";
+  accessPanel.dataset.open = "";
+  refreshAccessUi();
+  setStatus("Access saved on this device - tap to talk");
+  logLine("Access: saved on this device.");
+}
+$("saveAccessBtn").addEventListener("click", saveAccess);
+$("clearAccessBtn").addEventListener("click", () => {
+  localStorage.removeItem("hv-token");
+  accessPanel.dataset.open = "1";
+  refreshAccessUi();
+  logLine("Access: removed from this device.");
+});
+$("accessBtn").addEventListener("click", () => {
+  accessPanel.dataset.open = accessPanel.dataset.open === "1" ? "" : "1";
+  refreshAccessUi();
+});
+refreshAccessUi();
+
+// ---- state
+let pc = null, localStream = null, remoteStream = null;
+let pcId = null, iceBuffer = [];
+let audioCtx = null, micAnalyser = null, botAnalyser = null, rafId = null;
+let lastMicSpeechAt = 0, botSpeaking = false, jobRunning = false;
+let muted = false;
+let serverSpeaking = false;
+
+// ---- screen wake lock: mobile browsers suspend the page when the screen
+// locks, which kills the WebRTC session mid-conversation. While a session
+// is live we hold a screen wake lock; it auto-releases when the page is
+// hidden, so visibilitychange re-acquires it if the session is still live.
+let wakeLock = null, wakeLockWanted = false, wakeLockUnsupportedLogged = false;
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    if (!wakeLockUnsupportedLogged) {
+      wakeLockUnsupportedLogged = true;
+      logLine("Wake lock: not supported by this browser — the device's auto-lock setting governs the screen.");
+    }
+    return;
+  }
+  if (wakeLock || !wakeLockWanted) return;
+  try {
+    const lock = await navigator.wakeLock.request("screen");
+    if (!wakeLockWanted) { // session ended while the request was in flight
+      try { await lock.release(); } catch (e) {}
+      return;
+    }
+    wakeLock = lock;
+    logLine("Wake lock: acquired — screen stays awake while connected.");
+    lock.addEventListener("release", () => {
+      if (wakeLock === lock) { // not our own intentional release
+        wakeLock = null;
+        logLine("Wake lock: released by the system (page hidden or screen locked).");
+      }
+    });
+  } catch (e) {
+    logLine("Wake lock: request failed (" + e.name + "). The device's auto-lock setting governs the screen.");
+  }
+}
+
+function releaseWakeLock() {
+  wakeLockWanted = false;
+  if (wakeLock) {
+    const lock = wakeLock;
+    wakeLock = null;
+    lock.release().then(() => logLine("Wake lock: released.")).catch(() => {});
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && wakeLockWanted && !wakeLock) {
+    logLine("Wake lock: page visible again — re-acquiring.");
+    acquireWakeLock();
+  }
+});
+
+function level(analyser, buf) {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+  return Math.sqrt(sum / buf.length);
+}
+const micBuf = new Uint8Array(2048), botBuf = new Uint8Array(2048);
+
+function meterLoop() {
+  const mic = level(micAnalyser, micBuf), bot = level(botAnalyser, botBuf);
+  $("micMeter").style.width = Math.min(100, mic * 220) + "%";
+  $("botMeter").style.width = Math.min(100, bot * 220) + "%";
+  const now = performance.now();
+  if (mic > 0.04) lastMicSpeechAt = now;
+  const wasSpeaking = botSpeaking;
+  botSpeaking = bot > 0.02;
+  if (botSpeaking && !wasSpeaking && !debug.firstRemoteAudioAt) {
+    debug.firstRemoteAudioAt = now; mark("first_remote_audio");
+    debug.speechEndBeforeReply = lastMicSpeechAt;
+  }
+  if (pc && pc.connectionState === "connected") {
+    if (botSpeaking || serverSpeaking) setStatus("Vibherpunk is speaking", "live");
+    else if (jobRunning) setStatus("Vibherpunk is working…", "busy");
+    else if (now - lastMicSpeechAt < 1200 && lastMicSpeechAt > 0) setStatus("Listening — you are speaking", "live");
+    else if (lastMicSpeechAt > 0 && now - lastMicSpeechAt >= 1200 && !botSpeaking && debug.lastUserTurnAt && now - debug.lastUserTurnAt < 6000) setStatus("Thinking…", "busy");
+    else setStatus("Listening", "live");
+  }
+  rafId = requestAnimationFrame(meterLoop);
+}
+
+async function patchCandidates(cands) {
+  if (!pcId || !cands.length) return;
+  try {
+    await fetch("/api/offer?token=" + encodeURIComponent(token()), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pc_id: pcId, candidates: cands }),
+    });
+  } catch (e) { /* ICE patch failures are non-fatal on LAN/tailnet */ }
+}
+
+async function connect() {
+  if (pc) { disconnect(); return; }
+  if (!token()) { accessPanel.dataset.open = "1"; refreshAccessUi(); accessInput.focus(); return; }
+  connectBtn.disabled = true;
+  setStatus("Connecting…", "busy");
+  debug.connectStartedAt = performance.now(); mark("connect_tap");
+  logLine("Connecting…");
+  try {
+    // iOS: start playback inside the tap gesture chain.
+    remoteAudio.play().catch(() => {});
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    let iceServers = [];
+    try {
+      const ir = await fetch("/api/ice-config?token=" + encodeURIComponent(token()));
+      if (ir.ok) iceServers = (await ir.json()).iceServers || [];
+    } catch (e) { /* no relay config available: host candidates only */ }
+    logLine("ICE: " + (iceServers.length ? "relay configured" : "host candidates only"));
+    pc = new RTCPeerConnection({ iceServers });
+    pcId = null; iceBuffer = [];
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+    const dc = pc.createDataChannel("pipecat");
+    dc.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "job") {
+          jobRunning = msg.status === "running";
+          if (msg.status === "running") logLine("Vibherpunk is on it (background task).");
+          if (msg.status === "result") logLine("Vibherpunk reported back.");
+          return;
+        }
+        if (msg.label === "rtvi-ai") {
+          if (msg.type === "bot-started-speaking") serverSpeaking = true;
+          if (msg.type === "bot-stopped-speaking") serverSpeaking = false;
+          if (msg.type === "user-stopped-speaking") debug.lastUserTurnAt = performance.now();
+          if (msg.type === "user-transcription" && msg.data && msg.data.final) logLine("You: " + msg.data.text.trim());
+          if (msg.type === "bot-transcription" && msg.data) logLine("Vibherpunk: " + msg.data.text.trim());
+        }
+      } catch (e) { /* non-JSON app message: ignore */ }
+    };
+    pc.ontrack = (ev) => {
+      remoteStream = ev.streams[0];
+      remoteAudio.srcObject = remoteStream;
+      remoteAudio.play().catch(() => {});
+      logLine("Audio connected.");
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      audioCtx.resume().catch(() => {});
+      botAnalyser = audioCtx.createAnalyser();
+      const src = audioCtx.createMediaStreamSource(remoteStream);
+      src.connect(botAnalyser);
+    };
+    const candTypes = new Set();
+    pc.oniceconnectionstatechange = () => {
+      logLine("ICE state: " + pc.iceConnectionState);
+      if (pc.iceConnectionState === "checking") {
+        setTimeout(async () => {
+          if (!pc || pc.connectionState === "connected") return;
+          try {
+            const stats = await pc.getStats();
+            const pairs = [];
+            stats.forEach((r) => { if (r.type === "candidate-pair") pairs.push(r.state + (r.nominated ? "/nominated" : "")); });
+            if (pairs.length) logLine("ICE pairs after 9s: " + pairs.join(", "));
+          } catch (e) {}
+        }, 9000);
+      }
+    };
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      const cm = / typ ([a-z]+)/.exec(ev.candidate.candidate || "");
+      const ctype = cm ? cm[1] : "?";
+      if (!candTypes.has(ctype)) { candTypes.add(ctype); logLine("ICE candidate gathered: " + ctype); }
+      const c = {
+        candidate: ev.candidate.candidate,
+        sdp_mid: ev.candidate.sdpMid,
+        sdp_mline_index: ev.candidate.sdpMLineIndex,
+      };
+      if (pcId) patchCandidates([c]); else iceBuffer.push(c);
+    };
+    pc.onconnectionstatechange = () => {
+      logLine("Connection: " + pc.connectionState);
+      if (pc.connectionState === "connected") {
+        mark("pc_connected");
+        wakeLockWanted = true;
+        acquireWakeLock();
+        setStatus("Listening", "live");
+        connectBtn.textContent = "Disconnect";
+        connectBtn.classList.add("on");
+        connectBtn.disabled = false;
+        muteBtn.disabled = false;
+      } else if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
+        teardownUi();
+      }
+    };
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    micAnalyser = audioCtx.createAnalyser();
+    audioCtx.createMediaStreamSource(localStream).connect(micAnalyser);
+    cancelAnimationFrame(rafId); meterLoop();
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // Give ICE gathering a brief window so the offer itself carries the
+    // gathered candidates (host + relay); PATCH trickle covers late ones.
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") return resolve();
+      const to = setTimeout(resolve, 1800);
+      pc.addEventListener("icegatheringstatechange", () => {
+        if (pc.iceGatheringState === "complete") { clearTimeout(to); resolve(); }
+      });
+    });
+    const resp = await fetch("/api/offer?token=" + encodeURIComponent(token()), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    if (!resp.ok) throw new Error("server said " + resp.status);
+    const answer = await resp.json();
+    pcId = answer.pc_id;
+    await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+    mark("answer_applied");
+    const buffered = iceBuffer; iceBuffer = [];
+    if (buffered.length) patchCandidates(buffered);
+  } catch (e) {
+    logLine("Connect failed: " + e.message);
+    setStatus("Connection failed", "error");
+    teardownUi();
+  }
+}
+
+function teardownUi() {
+  releaseWakeLock();
+  if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+  remoteAudio.srcObject = null;
+  jobRunning = false;
+  connectBtn.textContent = "Tap to talk";
+  connectBtn.classList.remove("on");
+  connectBtn.disabled = false;
+  muteBtn.disabled = true;
+  setStatus("Disconnected", "");
+}
+
+function disconnect() {
+  logLine("Disconnected.");
+  teardownUi();
+}
+
+connectBtn.addEventListener("click", connect);
+muteBtn.addEventListener("click", () => {
+  muted = !muted;
+  if (localStream) localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  muteBtn.textContent = muted ? "Unmute mic" : "Mute mic";
+  muteBtn.setAttribute("aria-pressed", String(muted));
+});
+
+// Debug/test handle: lets the headless acceptance driver observe timings.
+window.hermesVoice = {
+  connect, disconnect, debug,
+  get pc() { return pc; },
+  get state() { return pc ? pc.connectionState : "none"; },
+  get remoteStream() { return remoteStream; },
+  get localStream() { return localStream; },
+  get wakeLock() { return wakeLock; },
+  get wakeLockWanted() { return wakeLockWanted; },
+  noteUserTurnEnd() { debug.lastUserTurnAt = performance.now(); },
+};
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  // When a new service worker takes over (a client update), reload once so
+  // the fix applies to this open page instead of the stale shell.
+  let swReloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (swReloaded) return;
+    swReloaded = true;
+    window.location.reload();
+  });
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>
