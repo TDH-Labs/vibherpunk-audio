@@ -127,6 +127,35 @@ Behavior and measurements are unchanged. Audio fixtures (`tests/*.wav`)
 from the original test runs are not included; the test scripts regenerate
 what they need.
 
+## The back office: you need an agent harness
+
+Vibherpunk Audio is a voice front end, not an agent. The parts divide like this:
+
+- **Whisper** hears (speech to text). **Pocket TTS** speaks. Neither does anything else.
+- **The conversation lane** (default model: GLM-5.3-Flash) talks. It answers what
+  can be answered on the spot and delegates everything that is real work.
+- **OpenCode Go is only a model provider** — it rents access to the lane and
+  worker models. It has no tools and cannot act on your computer.
+- **Real work** — reading files, checking a calendar, searching memory, running
+  commands, sending messages — is done by a back-office **agent harness** the
+  lane delegates to.
+
+The back office is reached through one OpenAI-shaped chat endpoint
+(`HERMES_WORKER_URL`, default `http://127.0.0.1:8642/v1`). The reference build
+uses the Hermes agent harness,
+which runs on your computer with its own tools, memory, and skills, and reports
+back when a delegated task is done; the result is then spoken aloud.
+
+Any harness that exposes an equivalent endpoint can serve as the back office.
+A bare model API cannot — it will reply with text but take no action, because
+nothing behind it can touch your computer. Using a Claude- or
+Antigravity-based agent as the back office would require a small bridge that
+accepts the chat request, hands the task to that agent, and returns its
+result; that bridge is not included in this repo.
+
+Without a harness connected, the system still talks, but delegated requests
+report that the back office is unavailable.
+
 ## License
 
 Vibherpunk Audio is free for personal and other noncommercial use under the
