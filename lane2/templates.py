@@ -81,6 +81,10 @@ TEMPLATES = {
         "The back office came back on {label} with {n} items. "
         "The first: {subject} is {value}. Want the rest?"],
     "T-RESULT-NULL": ["The back office came back on {label}: {summary}"],
+    # Lane3 H1 fallback: spoken when a result summary carries typed
+    # values not backed by registry facts — announces completion
+    # without repeating the unbacked values.
+    "T-RESULT-BRIEF": ["{label} is done.", "{label} finished."],
     "T-SCOPE-KILLED": [
         "That needed {capability}, which it didn't have — stopped."],
     "T-DISPATCH-FAILED": [

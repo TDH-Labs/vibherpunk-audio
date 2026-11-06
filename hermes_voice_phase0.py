@@ -5,7 +5,7 @@ Pipeline: LocalAudioTransport (mic/speakers) -> Silero VAD + Smart Turn (in the
 user aggregator) -> faster-whisper STT -> Hermes gateway (OpenAI-compatible,
 model "hermes-agent") -> Pocket TTS (streaming, catalog voice) -> speakers.
 
-Run (from ~/workspace/hermes-voice):
+Run (from /Users/ai/workspace/hermes-voice):
     API_SERVER_KEY=$(grep '^API_SERVER_KEY' ~/.hermes/.env | head -1 | cut -d= -f2-) \
         .venv/bin/python hermes_voice.py
 
@@ -41,19 +41,23 @@ from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 
-# Default route = the trimmed "voice" profile on the shared gateway
-# (multiplex path /p/<profile>/v1). Its API key lives in
-# ~/.hermes/profiles/voice/.env (API_SERVER_KEY) — see RUNBOOK.md.
-# Override with HERMES_GATEWAY_URL (e.g. http://127.0.0.1:8642/v1 for the
-# full default profile).
-GATEWAY_BASE_URL = os.environ.get(
-    "HERMES_GATEWAY_URL", "http://127.0.0.1:8642/p/voice/v1"
+# Default route = Antigravity bridge on http://127.0.0.1:8011/v1
+# Override with AGY_GATEWAY_URL or HERMES_GATEWAY_URL.
+GATEWAY_BASE_URL = (
+    os.environ.get("AGY_GATEWAY_URL")
+    or os.environ.get("HERMES_GATEWAY_URL")
+    or "http://127.0.0.1:8011/v1"
+)
+GATEWAY_MODEL = (
+    os.environ.get("AGY_WORKER_MODEL")
+    or os.environ.get("HERMES_WORKER_MODEL")
+    or "gemini-3.8-flash-low"
 )
 VOICE = os.environ.get("HERMES_VOICE", "eve")
 WHISPER_MODEL = os.environ.get("HERMES_WHISPER", "small")
 
 SYSTEM_INSTRUCTION = (
-    "You are Hermes in a live voice conversation. Reply in short, natural spoken "
+    "You are Vibherpunk (backed by Antigravity) in a live voice conversation. Reply in short, natural spoken "
     "sentences — one or two at a time. No lists, no markdown, no code unless asked. "
     "If a task will take a while, first say what you are doing in one short sentence."
 )
@@ -135,7 +139,7 @@ def build_llm(base_url: str | None = None) -> OpenAILLMService:
         api_key=os.environ.get("API_SERVER_KEY", ""),
         base_url=base_url or GATEWAY_BASE_URL,
         settings=OpenAILLMService.Settings(
-            model="hermes-agent",
+            model=GATEWAY_MODEL,
             system_instruction=SYSTEM_INSTRUCTION,
         ),
     )

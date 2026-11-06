@@ -12,7 +12,7 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 from openai import AsyncOpenAI
 
 import hermes_voice as hv
@@ -47,7 +47,7 @@ HISTORY = [
 CHAT_Q = "What color do you get mixing blue and yellow paint?"
 
 MUST_DELEGATE = [
-    "Please have Hermes check its memory and tell me what city the user lives in, and what timezone he is in.",
+    "Please have Hermes check its memory and tell me what city Adam lives in, and what timezone he is in.",
     "Have the back office research the weather in Portland this weekend and give me a summary.",
     "Ask Hermes to read the first line of its SOUL file and tell me the exact words it finds there.",
 ]
@@ -113,14 +113,14 @@ SYSTEM_PROMPT = (
 MUST_LOOKUP = [
     "What city do I live in?",
     "What time zone am I in?",
-    "Who is Alex?",
+    "Who is Mia?",
 ]
 
 
 async def main():
     client = AsyncOpenAI(
         base_url=os.environ["LANE_BASE_URL"],
-        api_key="test-key-not-real",
+        api_key="local-lane-probe",
     )
     model = os.environ["LANE_MODEL"]
     out = {"model": model, "ttft": [], "delegate": [], "answer": [], "lookup": []}

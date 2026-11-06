@@ -18,7 +18,7 @@ import numpy as np
 import scipy.io.wavfile
 from scipy.signal import resample_poly
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 from pipecat.frames.frames import (
     EndFrame,

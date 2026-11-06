@@ -1,6 +1,6 @@
 #!/bin/zsh
 export PATH=$HOME/.local/bin:/opt/homebrew/bin:$PATH
-cd $HOME/workspace/hermes-voice
+cd /Users/ai/workspace/hermes-voice
 echo "=== install start $(date) ===" >> logs/install.log
 if brew list --versions portaudio >/dev/null 2>&1; then
   echo "portaudio present: $(brew list --versions portaudio)" >> logs/install.log

@@ -1,7 +1,7 @@
 /* Vibherpunk Audio — shell cache only. API/WebRTC traffic is never cached.
    STANDING RULE: any change under client/ MUST bump CACHE below, or
    installed devices keep serving the stale shell (see RUNBOOK-mobile.md). */
-const CACHE = "vibherpunk-audio-v5";
+const CACHE = "vibherpunk-audio-v7";
 const SHELL = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (ev) => {

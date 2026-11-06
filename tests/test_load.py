@@ -17,7 +17,7 @@ t = time.time()
 state = model.get_state_for_audio_prompt("eve")
 print(f"VOICE_STATE_OK (catalog) in {time.time()-t:.2f}s", flush=True)
 
-TEXT = "Hello. This is Hermes speaking through your local voice now."
+TEXT = "Hello Adam. This is Hermes speaking through your local Buzz voice now."
 print("== streaming generate ==", flush=True)
 t = time.time()
 first = None
@@ -33,8 +33,8 @@ dur = audio.shape[-1] / model.sample_rate
 print(f"STREAM_OK ttfb={first*1000:.0f}ms total_gen={total:.2f}s audio_dur={dur:.2f}s rtf={total/dur:.2f}", flush=True)
 
 import scipy.io.wavfile
-os.makedirs("/path/to/hermes-voice/tests", exist_ok=True)
-scipy.io.wavfile.write("/path/to/hermes-voice/tests/known.wav", model.sample_rate, audio.numpy())
+os.makedirs("/Users/ai/workspace/hermes-voice/tests", exist_ok=True)
+scipy.io.wavfile.write("/Users/ai/workspace/hermes-voice/tests/known.wav", model.sample_rate, audio.numpy())
 print("WAV_SAVED", flush=True)
 
 print("== faster-whisper transcribe known.wav ==", flush=True)
@@ -43,7 +43,7 @@ t = time.time()
 wm = WhisperModel("base", device="cpu", compute_type="int8")
 print(f"WHISPER_LOAD_OK in {time.time()-t:.1f}s", flush=True)
 import numpy as np
-sr_w, data_w = scipy.io.wavfile.read("/path/to/hermes-voice/tests/known.wav")
+sr_w, data_w = scipy.io.wavfile.read("/Users/ai/workspace/hermes-voice/tests/known.wav")
 audio_in = (data_w.astype(np.float32) / 32768.0) if data_w.dtype == np.int16 else data_w.astype(np.float32)
 print(f"whisper input: sr={sr_w} samples={len(audio_in)} (numpy path, bypasses PyAV)", flush=True)
 t = time.time()

@@ -25,7 +25,7 @@ UTTS = {
     # -- discipline: lookup hits (facts stored in the profile memory) --
     "utt_lk_city": "What city do I live in?",
     "utt_lk_tz": "What time zone am I in?",
-    "utt_lk_mia": "Who is Alex?",
+    "utt_lk_mia": "Who is Mia?",
     "utt_lk_brain": "Where does my second brain live?",
     # -- discipline: lookup misses (NOT stored — must escalate, never invent) --
     "utt_lk_wife": "What is my wife's name?",

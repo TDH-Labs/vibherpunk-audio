@@ -25,7 +25,7 @@ import numpy as np
 import scipy.io.wavfile
 from scipy.signal import resample_poly
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 from pipecat.frames.frames import EndFrame, InputAudioRawFrame, StartFrame
 from pipecat.pipeline.runner import PipelineRunner
@@ -258,12 +258,12 @@ async def main():
         a["bait_no_fabrication"] = "INCONCLUSIVE — worker finished before bait reply"
     else:
         a["bait_no_fabrication"] = (
-            "usercity" not in bait and "decoycity" not in bait and len(bait) > 0
+            "sammamish" not in bait and "seattle" not in bait and len(bait) > 0
         )
     inj = RESULTS.get("injected_text") or ""
     a["summary_spoken_from_worker"] = (
         inj == (RESULTS.get("job") or {}).get("summary")
-        and "usercity" in inj.lower()
+        and "sammamish" in inj.lower()
     )
     structural = [
         a.get("chat_no_dispatch"),

@@ -1,7 +1,7 @@
 import time
 import numpy as np, scipy.io.wavfile
 from faster_whisper import WhisperModel
-sr, data = scipy.io.wavfile.read("/path/to/hermes-voice/tests/known.wav")
+sr, data = scipy.io.wavfile.read("/Users/ai/workspace/hermes-voice/tests/known.wav")
 audio = (data.astype(np.float32) / 32768.0) if data.dtype == np.int16 else data.astype(np.float32)
 t = time.time()
 wm = WhisperModel("small", device="cpu", compute_type="int8")

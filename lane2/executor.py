@@ -18,6 +18,17 @@ Semantics carried from the production DelegationBridge:
   the job's task_class as capability_scope; READ_ONLY jobs get an
   explicit read-only instruction the worker must honor, and the stub
   refuses write-tool attempts under READ_ONLY scope (contract test).
+- Session binding: every dispatch sends X-Hermes-Session-Id so the
+  turn lands in a real, resumable Hermes session in state.db instead
+  of a fingerprint-derived anonymous one. This is a HEADER, not a body
+  field (gateway/platforms/api_server_openai_routes.py): the gateway
+  rejects a body "session_id" by ignoring it, and the header is
+  API-key-gated (403 without API_SERVER_KEY) and path-safety checked.
+  When the header is present the gateway loads conversation history
+  from SessionDB, so continuation dispatches share the session's
+  transcript. Verified live 2026-10-29 against the :8642 gateway:
+  two turns on "lane2-desk" both returned X-Hermes-Session-Id:
+  lane2-desk and turn 2 recalled turn 1's answer.
 """
 import asyncio
 import json
@@ -55,15 +66,36 @@ def _summary_of(full):
     return (tail[-1].strip()[:200] if tail else "Done.")
 
 
+# Total wall-clock budget for one dispatch (submit + stream). The
+# v2 executor ran with total=None: a hung gateway stream left the job
+# RUNNING forever with no watchdog (review M7). Override per-instance
+# (tests) or via env.
+DISPATCH_TOTAL_TIMEOUT_S = float(
+    os.environ.get("LANE2_DISPATCH_TIMEOUT_S", "300"))
+
+
 class GatewayExecutor:
-    def __init__(self, base_url, model, api_key, emit):
+    def __init__(self, base_url, model, api_key, emit, session_id=None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.emit = emit
+        # Real Hermes session this lane's dispatches bind to. Sent as
+        # X-Hermes-Session-Id (header only — see module docstring), so
+        # voice-driven work is resumable and its transcript is readable
+        # from the session store instead of being an anonymous run.
+        self.session_id = session_id
+        self.total_timeout_s = DISPATCH_TOTAL_TIMEOUT_S
         self._tasks = {}  # job_id -> asyncio.Task
         self._results = {}  # job_id -> full text (for COMPLETED race)
+        self._specs = {}  # job_id -> (task_text, task_class) for resume
         self._cb = None
+
+    def _headers(self):
+        h = {"Authorization": f"Bearer {self.api_key}"}
+        if self.session_id:
+            h["X-Hermes-Session-Id"] = str(self.session_id)
+        return h
 
     def bind(self, on_started, on_done, on_error):
         self._cb = (on_started, on_done, on_error)
@@ -74,7 +106,7 @@ class GatewayExecutor:
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                         self.base_url + "/models",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        headers=self._headers(),
                         timeout=aiohttp.ClientTimeout(total=5)) as r:
                     return r.status == 200
         except Exception:
@@ -84,9 +116,13 @@ class GatewayExecutor:
         jid = job_row["job_id"]
         spec = json.loads(job_row["task_spec"] or "{}")
         task_text = spec.get("text", "")
+        self._specs[jid] = (task_text, job_row["task_class"])
         prompt = DISPATCH_TEMPLATE.format(task=task_text)
         if job_row["task_class"] == "READ_ONLY":
             prompt += READ_ONLY_SUFFIX
+        await self._run_stream(jid, prompt)
+
+    async def _run_stream(self, jid, prompt):
         task = asyncio.current_task()
         self._tasks[jid] = task
         started = False
@@ -94,11 +130,12 @@ class GatewayExecutor:
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                         self.base_url + "/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        headers=self._headers(),
                         json={"model": self.model, "stream": True,
                               "messages": [{"role": "user",
                                             "content": prompt}]},
-                        timeout=aiohttp.ClientTimeout(total=None)) as resp:
+                        timeout=aiohttp.ClientTimeout(
+                            total=self.total_timeout_s)) as resp:
                     if resp.status != 200:
                         body = (await resp.text())[:200]
                         retryable = resp.status in (429,) or resp.status >= 500
@@ -108,23 +145,46 @@ class GatewayExecutor:
                             retryable=retryable)
                         return
                     buf = []
+                    # SSE is a line protocol; resp.content yields
+                    # arbitrary byte chunks, so reassemble lines in a
+                    # buffer (a JSON event split across chunks must
+                    # not be silently dropped).
+                    pending = b""
+                    done = False
                     async for raw in resp.content:
-                        line = raw.decode("utf-8", "replace").strip()
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
+                        pending += raw
+                        while b"\n" in pending and not done:
+                            rawline, pending = pending.split(b"\n", 1)
+                            line = rawline.decode(
+                                "utf-8", "replace").strip()
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                done = True
+                                break
+                            try:
+                                ev = json.loads(data)
+                            except Exception:
+                                continue
+                            # The gateway legitimately emits streamed
+                            # events with no "choices" key (usage /
+                            # progress events) and terminal chunks with
+                            # an empty choices list. v2 crashed on
+                            # ev["choices"] (KeyError) — that one line
+                            # failed 14/14 real Tier 2 dispatches
+                            # (lane3 A1 repro, 2026-10-28).
+                            choices = ev.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta") or {}
+                            piece = delta.get("content") or ""
+                            if piece and not started:
+                                started = True
+                                await self._cb[0](jid)
+                            buf.append(piece)
+                        if done:
                             break
-                        try:
-                            ev = json.loads(data)
-                        except Exception:
-                            continue
-                        delta = ev["choices"][0].get("delta", {})
-                        piece = delta.get("content") or ""
-                        if piece and not started:
-                            started = True
-                            await self._cb[0](jid)
-                        buf.append(piece)
                     full = "".join(buf)
                     self._results[jid] = full
                     summary = _summary_of(full)
@@ -155,7 +215,29 @@ class GatewayExecutor:
         return "CANCELLED"
 
     def resume(self, job_id, answer):
-        self.emit("executor_resume_unsupported", job_id=job_id)
+        """OA continuation (review M7: this was a silent no-op — the
+        job went back to RUNNING with nothing executing it and never
+        terminated). The gateway executor is stateless per call, so a
+        resume is a continuation dispatch: original task + the user's
+        answer, same job id, same callbacks."""
+        spec = self._specs.get(job_id)
+        if spec is None:
+            self.emit("executor_resume_no_spec", job_id=job_id)
+            return
+        task_text, task_class = spec
+        prompt = DISPATCH_TEMPLATE.format(task=task_text)
+        if task_class == "READ_ONLY":
+            prompt += READ_ONLY_SUFFIX
+        prompt += (f"\n\nFOLLOW-UP: while working on this you asked a "
+                   f"question and the user answered: {answer}. "
+                   f"Continue the task with that answer.")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.emit("executor_resume_no_loop", job_id=job_id)
+            return
+        self._tasks[job_id] = loop.create_task(
+            self._run_stream(job_id, prompt))
 
 
 class StubExecutor:

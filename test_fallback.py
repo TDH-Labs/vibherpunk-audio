@@ -13,10 +13,10 @@ os.environ["HERMES_LANE_BACKEND"] = "cloud"
 os.environ["HERMES_FUSED_LOOKUP"] = "on"
 os.environ.setdefault(
     "HERMES_VOICE_LOGDIR",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs-cloud-fallback"),
+    "/Users/ai/workspace/hermes-voice/logs-cloud-fallback",
 )
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
+os.chdir("/Users/ai/workspace/hermes-voice")
 
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402

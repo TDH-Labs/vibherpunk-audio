@@ -1,16 +1,16 @@
 # RUNBOOK — Hermes Voice, mobile (WebRTC) transport
 
-> **Branding (2026-10-27, the user):** the app's display name is **Vibherpunk Audio** (page title, heading, PWA manifest name; short_name "Vibherpunk"). All user-visible "Hermes" strings were removed from client/ and the shell cache was bumped to vibherpunk-audio-v4. Internal names (project dir, launchd labels, the window.hermesVoice JS handle) are unchanged working names. Spoken announcements were renamed to Vibherpunk the same evening (the user's call): held results announce "Vibherpunk finished", and the desk lane now speaks as Vibherpunk with the worker referred to as "the back office" (hermes_voice.py LANE_SYSTEM_PROMPT; internal tool name delegate_to_hermes unchanged).
+> **Branding (2026-10-27, Adam):** the app's display name is **Vibherpunk Audio** (page title, heading, PWA manifest name; short_name "Vibherpunk"). All user-visible "Hermes" strings were removed from client/ and the shell cache was bumped to vibherpunk-audio-v4. Internal names (project dir, launchd labels, the window.hermesVoice JS handle) are unchanged working names. Spoken announcements were renamed to Vibherpunk the same evening (Adam's call): held results announce "Vibherpunk finished", and the desk lane now speaks as Vibherpunk with the worker referred to as "the back office" (hermes_voice.py LANE_SYSTEM_PROMPT; internal tool name delegate_to_hermes unchanged).
 
 
 The phone/tablet front end for the Hermes live-voice system. Same brain as
 the desk bot (fast lane + Hermes worker, MLX Whisper, Pocket "eve") — this
 is a second *transport* on the same pipeline, not a second voice stack.
 
-## The address (how the user connects)
+## The address (how Adam connects)
 
 ```
-https://your-mac.your-tailnet.ts.net:8443/?token=<TOKEN>
+https://ais-mac-studio.tail3b031e.ts.net:8443/?token=<TOKEN>
 ```
 
 - `<TOKEN>` lives in `~/.hermes/mobile-voice-token` on the Mac (file mode
@@ -18,9 +18,9 @@ https://your-mac.your-tailnet.ts.net:8443/?token=<TOKEN>
   **Never paste the token into chat, docs, or git.**
 - Open the link once per phone: the page stores the token on the device and
   strips it from the address bar. Later visits to the bare address
-  (`https://your-mac.your-tailnet.ts.net:8443/`) just work on that
+  (`https://ais-mac-studio.tail3b031e.ts.net:8443/`) just work on that
   device.
-- Tailnet-only: the address resolves and answers only on the user's tailnet
+- Tailnet-only: the address resolves and answers only on Adam's tailnet
   (Tailscale Serve). Nothing is exposed to the public internet.
 - To rotate the token: delete `~/.hermes/mobile-voice-token`, restart the
   service (below), then open the new link on each phone once.
@@ -53,9 +53,9 @@ Sleep is the soft off. The hard off is stopping the service:
 `launchctl bootout gui/501/ai.hermes.voice-mobile` (desk bot:
 `launchctl bootout gui/501/ai.hermes.voice`).
 
-## the user's 3-minute check — Android (Chrome)
+## Adam's 3-minute check — Android (Chrome)
 
-**PENDING-OWNER-TEST** (needs the physical phone)
+**PENDING-ADAM-TEST** (needs the physical phone)
 
 1. Phone on Tailscale (app connected), open the link in Chrome.
 2. Tap **Add to Home screen** if you want it as an app icon (optional).
@@ -79,9 +79,9 @@ Sleep is the soft off. The hard off is stopping the service:
 Pass: all of the above, no errors. Anything else: note what the status line
 said and tell Muse.
 
-## the user's 3-minute check — iPhone (Safari)
+## Adam's 3-minute check — iPhone (Safari)
 
-**PENDING-OWNER-TEST** (needs the physical phone)
+**PENDING-ADAM-TEST** (needs the physical phone)
 
 1. Phone on Tailscale (app connected), open the link in Safari.
 2. Optional: Share → **Add to Home Screen** for the app icon.
@@ -112,7 +112,7 @@ that is what step 5 is for.
 | Piece | What |
 |---|---|
 | Mobile server | launchd `ai.hermes.voice-mobile` → `run_mobile.sh` → `mobile_server.py`, binds **127.0.0.1:8917** only |
-| TURN relay | launchd `ai.hermes.turn` → coturn, config `~/.hermes/turnserver.conf` (0600), listens **127.0.0.1 + the host's tailnet IP :3478** (UDP+TCP) only — never public. The phone gets short-lived credentials from the token-gated `GET /api/ice-config`; the shared secret is `~/.hermes/turn-auth-secret` (0600, never printed). Restart: `launchctl kickstart -k gui/<uid>/ai.hermes.turn` |
+| TURN relay | launchd `ai.hermes.turn` → coturn, config `~/.hermes/turnserver.conf` (0600), listens **127.0.0.1 + 100.75.91.86 :3478** (UDP+TCP) only — never public. The phone gets short-lived credentials from the token-gated `GET /api/ice-config`; the shared secret is `~/.hermes/turn-auth-secret` (0600, never printed). Restart: `launchctl kickstart -k gui/501/ai.hermes.turn` |
 | Serving | `tailscale serve --https=8443 http://127.0.0.1:8917` (background serve entry; the :443, :7443 and :10000 entries belong to other services — leave them) |
 | Logs | `logs-mobile/` in the project (`metrics.jsonl`, `launchd.*.log`, `server.out.log`) |
 | Session state | `GET /api/session` with header `x-voice-token: <TOKEN>` (events, spoken lines, turn timings) |

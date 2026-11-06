@@ -13,7 +13,7 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 import hermes_voice as hv
 
@@ -46,7 +46,7 @@ ITEMS = [
     # lookup (stored-fact questions; misses escalate inside the flow)
     ("What city do I live in?", "lookup"),
     ("What time zone am I in?", "lookup"),
-    ("Who is Alex?", "lookup"),
+    ("Who is Mia?", "lookup"),
     ("Where does my second brain live?", "lookup"),
     ("What is my wife's name?", "lookup"),
     ("What is my blood type?", "lookup"),
@@ -56,7 +56,7 @@ ITEMS = [
     ("When is my birthday?", "lookup"),
     ("What voice do you speak with?", "lookup"),
     # delegate (work / live data / multi-step)
-    ("Please have Hermes check its memory and tell me what city the user lives in, and what timezone he is in. I want the real answer from Hermes itself, so take your time.", "delegate"),
+    ("Please have Hermes check its memory and tell me what city Adam lives in, and what timezone he is in. I want the real answer from Hermes itself, so take your time.", "delegate"),
     ("Please have Hermes read the first line of its SOUL file and tell me the exact words it finds there. Take your time.", "delegate"),
     ("Please have Hermes list the names of the profiles it has on this machine. Take your time.", "delegate"),
     ("Please have Hermes check what operating system version this Mac is running, using its tools. Take your time.", "delegate"),
@@ -67,7 +67,7 @@ ITEMS = [
     ("Do I have anything on my calendar tomorrow?", "delegate"),
     ("How's the weather outside right now?", "delegate"),
     ("Summarize the RUNBOOK file for me.", "delegate"),
-    ("Send an email to Jordan about the invoices.", "delegate"),
+    ("Send an email to Katrina about the invoices.", "delegate"),
     # flow turns (no new work; lane answers / holds / reports status)
     ("Is that done yet?", "answer"),
     ("It's probably going to be sunny in Portland, right? Just tell me what it found.", "answer"),

@@ -32,6 +32,11 @@ HOLD_EXTEND_MS = 4000
 HOLD_CAP_MS = 6000
 CONFIRM_HOLD_S = 8.0
 DUP_CONFIRM_S = 15.0
+# Lane3 H4: a confirm whose prompt has not been PLAYED yet must not
+# live forever. The hold timer only starts at playback; if playback
+# never happens (barge-in eaten, speaker fault), the arm timer
+# disarms the confirm silently after this long.
+CONFIRM_ARM_TTL_S = 30.0
 TRAILING_TERMINAL_S = 20.0
 TRAILING_SIDE_EFFECTING_S = 120.0
 
@@ -179,6 +184,13 @@ class Arbiter:
     async def stop(self):
         if self._loop_task:
             self._loop_task.cancel()
+        c = self._confirm
+        if c:
+            if c.get("task"):
+                c["task"].cancel()
+            if c.get("arm_task") is not None:
+                c["arm_task"].cancel()
+            self._confirm = None
 
     def set_client_awake(self, awake):
         self._client_awake = awake
@@ -488,9 +500,48 @@ class Arbiter:
                     self.emit("cancel_finalized", job_id=jid)
 
     # ------------------------------------------------------------ confirms
+    def _set_confirm(self, c):
+        """Install a confirm and arm its never-played expiry (H4).
+        Every confirm creation goes through here."""
+        self._confirm_seq = getattr(self, "_confirm_seq", 0) + 1
+        c["confirm_id"] = self._confirm_seq
+        c["armed_mono"] = time.monotonic()
+        c["arm_task"] = None
+        self._confirm = c
+        try:
+            c["arm_task"] = asyncio.get_running_loop().create_task(
+                self._arm_timer(c["confirm_id"]))
+        except RuntimeError:
+            pass  # no loop (sync construction in tests): no arm timer
+
+    async def _arm_timer(self, confirm_id):
+        await asyncio.sleep(CONFIRM_ARM_TTL_S)
+        async with self._lock:
+            c = self._confirm
+            if not c or c.get("confirm_id") != confirm_id:
+                return
+            if c.get("spoken_mono") is not None:
+                return  # played: the hold timer owns expiry now
+            self._confirm = None
+            jid = c["job_id"]
+            row = self.reg.get(jid)
+            if row and row["status"] == "BAND_HELD":
+                # Silent: the user never heard a prompt, so speaking
+                # "didn't hear a confirm" would be a phantom. The job
+                # simply returns to un-acted state.
+                await self.reg.transition(jid, "CONFIRM_EXPIRED",
+                                          ack_required=True)
+                self.emit("confirm_expired_unplayed", job_id=jid)
+            elif row and row["status"] == "HELD_DUPLICATE":
+                await self.reg.transition(jid, "MERGED",
+                                          ack_required=True)
+                self.counters["merged"] += 1
+                self.emit("dup_confirm_expired_unplayed", job_id=jid)
+
     async def _open_confirm(self, jid, d: Directive, kind):
-        self._confirm = {"job_id": jid, "kind": kind, "directive": d,
-                         "spoken_mono": None, "task": None}
+        c = {"job_id": jid, "kind": kind, "directive": d,
+             "spoken_mono": None, "task": None}
+        self._set_confirm(c)
         slots = {"verb": d.verb or "do", "obj": d.obj or "that"}
         template = "T-CONFIRM"
         if d.draft_send:
@@ -516,6 +567,9 @@ class Arbiter:
         if not c or c["job_id"] != job_id:
             return
         c["spoken_mono"] = time.monotonic()
+        if c.get("arm_task") is not None:
+            c["arm_task"].cancel()
+            c["arm_task"] = None
         c["task"] = asyncio.create_task(self._confirm_timer(job_id))
 
     async def _confirm_timer(self, job_id):
@@ -549,12 +603,20 @@ class Arbiter:
         if c and c["job_id"] == jid:
             if c.get("task"):
                 c["task"].cancel()
+            if c.get("arm_task") is not None:
+                c["arm_task"].cancel()
             self._confirm = None
 
     async def _confirm_reply(self, d: Directive):
         c = self._confirm
         if not c:
             self.emit("confirm_reply_orphan", seq=d.seq)
+            return
+        if c.get("spoken_mono") is None:
+            # H4: the user cannot affirm a prompt they never heard.
+            # A "yes" arriving before playback is not consent.
+            self.emit("confirm_reply_unplayed", seq=d.seq,
+                      job_id=c["job_id"])
             return
         if d.p_closed is not None and d.p_closed < P_CLOSED_MIN:
             self.emit("confirm_reply_lowconf", seq=d.seq, p=d.p_closed)
@@ -738,13 +800,14 @@ class Arbiter:
                                       ack_required=True)
             self.counters["held_duplicate"] += 1
             spec = json.loads(row["task_spec"] or "{}")
-            self._confirm = {"job_id": jid, "kind": "dup",
-                             "directive": Directive(
-                                 seq=row["origin_seq"], turn=row["origin_turn"],
-                                 kind="delegate", text=spec.get("text", ""),
-                                 verb=spec.get("verb", ""),
-                                 obj=spec.get("obj", "")),
-                             "spoken_mono": None, "task": None}
+            self._set_confirm({
+                "job_id": jid, "kind": "dup",
+                "directive": Directive(
+                    seq=row["origin_seq"], turn=row["origin_turn"],
+                    kind="delegate", text=spec.get("text", ""),
+                    verb=spec.get("verb", ""),
+                    obj=spec.get("obj", "")),
+                "spoken_mono": None, "task": None})
             self.speak_enqueue(Obligation(
                 "dup_confirm", 2, job_id=jid, template="T-DUP-CONFIRM",
                 slots={"label": self._label(match["job_id"])}))
@@ -796,10 +859,15 @@ class Arbiter:
                 # (§2.8: a result arriving after a cancel request is
                 # not announced). Without this the job sat in
                 # CANCEL_REQUESTED forever — non-terminal limbo.
+                # held_unannounced filters on announced, not
+                # delivered_mono — without announced=1 here the
+                # suppressed result resurfaced as a "held result" on
+                # the next wake (lane3 H5, gain direction).
                 await self.reg.transition(
                     job_id, "DONE", ack_required=True,
                     result_summary=summary, result_facts=facts,
-                    delivered_mono=time.monotonic())
+                    delivered_mono=time.monotonic(),
+                    announced=1, announced_mono=time.monotonic())
                 self.emit("completion_after_cancel", job_id=job_id)
                 return
             await self.reg.transition(
@@ -852,6 +920,23 @@ class Arbiter:
                        "preflight_red": self._preflight_red}))
             self.emit("dispatch_failed", job_id=job_id, error=str(exc),
                       http_status=http_status)
+
+    # ------------------------------------------------------------ anticipation (lane3 B)
+    def note_anticipation(self, turn_id, route_suggestion, draft_text):
+        """Record an anticipator draft for a turn. ADVISORY ONLY:
+        the anticipator holds no routing authority and this method
+        writes no job state — it keeps the suggestion on a
+        turn-scoped record so the exam can score suggestion vs the
+        decider's actual route, and emits an event."""
+        rec = {"turn_id": turn_id, "route_suggestion": route_suggestion,
+               "draft_chars": len(draft_text or ""),
+               "mono": time.monotonic()}
+        self._anticipations = getattr(self, "_anticipations", {})
+        self._anticipations[turn_id] = rec
+        self.emit("anticipation", turn_id=turn_id,
+                  route_suggestion=route_suggestion,
+                  draft_chars=rec["draft_chars"])
+        return rec
 
     # ------------------------------------------------------------ held results (G.3)
     def held_results(self):

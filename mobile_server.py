@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Hermes live voice — MOBILE transport (SmallWebRTC), a second transport on
+"""Vibherpunk Audio — MOBILE transport (SmallWebRTC), a second transport on
 the Phase 1 pipeline. NOT a second voice stack: this module imports
 hermes_voice.py and reuses its exact two-tier assembly (lane + DelegationBridge
-worker, MLX Whisper STT, Pocket eve TTS, silence trimmer, failure announcer,
-discipline prompt unchanged). The only differences from the desk bot:
+worker, MLX Whisper STT, Pocket TTS, silence trimmer, failure announcer,
+anti-slop operator prompt unchanged). The only differences from the desk bot:
 
   * Transport: SmallWebRTCTransport (phone browser) instead of
     LocalAudioTransport. This process NEVER opens the Mac's mic or speakers.
@@ -20,13 +20,13 @@ discipline prompt unchanged). The only differences from the desk bot:
     Processor in hermes_voice.py) speaks its confirmation, then this
     session ends (reason=sleep_command). The hard off remains launchctl.
 
-Serving: binds 127.0.0.1 only (MOBILE_PORT, default 8917). The owner reaches it
+Serving: binds 127.0.0.1 only (MOBILE_PORT, default 8917). Adam reaches it
 through `tailscale serve` (HTTPS on the tailnet FQDN = secure context).
 Access control: tailnet membership PLUS a shared token (MOBILE_ACCESS_TOKEN,
-loaded by run_mobile.sh from ~/.hermes/mobile-voice-token; never printed).
-The token gates /api/offer (POST+PATCH) and /api/session.
+loaded by run_mobile.sh from ~/.gemini/antigravity/voice/mobile-voice-token;
+never printed). The token gates /api/offer (POST+PATCH) and /api/session.
 
-Run (from the repo root):  ./run_mobile.sh
+Run (from /Users/ai/workspace/hermes-voice):  ./run_mobile.sh
 """
 import os
 
@@ -53,6 +53,7 @@ from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     TextFrame,
@@ -76,6 +77,7 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 import hermes_voice as hv
+import viseme as viseme_mod
 
 BASE_DIR = Path(__file__).resolve().parent
 CLIENT_DIR = BASE_DIR / "client"
@@ -184,12 +186,10 @@ class MobileBridge(hv.DelegationBridge):
 # and the WebRTC transport ends.
 # --------------------------------------------------------------------------
 def build_mobile_pipeline(transport: SmallWebRTCTransport, session_id: str):
-    context = LLMContext(messages=[], tools=hv.lane_tools())
+    context = LLMContext(messages=[], tools=[hv.DELEGATE_TOOL, hv.CHECK_JOBS_TOOL])
     bridge = MobileBridge(hv.SESSION, context, session_id)
     gate = hv.WakeWordGate(hv.SESSION, bridge)  # disabled: pass-through
     bridge.attach_gate(gate)
-    anticipator = hv.Anticipator(hv.SESSION)
-    bridge.attach_anticipator(anticipator)
     sleep_proc = hv.SleepCommandProcessor(hv.SESSION)
     sleep_proc.add_callback(gate.rearm_now)
     bridge.sleep_processor = sleep_proc
@@ -199,20 +199,6 @@ def build_mobile_pipeline(transport: SmallWebRTCTransport, session_id: str):
         )
     )
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
-    if hv.LANE_BACKEND == "lane2":
-        # Stable lane session id ("mobile") so registry jobs and held
-        # results survive across WebRTC reconnects.
-        lane_stage = [hv.build_lane2(hv.SESSION, "mobile")]
-    else:
-        lane_stage = [
-            hv.EncoderRouterTap(
-                hv.SESSION,
-                hv.RouterDecider(hv.INTENT_CLASSIFIER),
-                bridge=bridge,
-                anticipator=anticipator,
-            ),
-            hv.build_lane_llm(hv.SESSION, bridge),
-        ]
     pipeline = Pipeline(
         [
             transport.input(),
@@ -220,14 +206,15 @@ def build_mobile_pipeline(transport: SmallWebRTCTransport, session_id: str):
             hv.build_stt(),
             sleep_proc,
             hv.TranscriptionTap(hv.SESSION),
-            hv.AnticipatorTap(anticipator),
             aggregators.user(),
             hv.TurnTap(hv.SESSION),
             hv.SpokenFailureAnnouncer(hv.SESSION),
-            *lane_stage,
+            hv.build_lane_llm(hv.SESSION, bridge),
             hv.TextTap(hv.SESSION),
             hv.build_tts(),
             hv.LeadingSilenceTrimmer(),
+            hv.TrailingSilenceTrimmer(),
+            viseme_mod.VisemeTap(notify=bridge._push),
             hv.SoundTap(hv.SESSION),
             transport.output(),
             aggregators.assistant(),
@@ -262,17 +249,20 @@ class MobileSession:
         self.started_wall = time.time()
         self.ended: dict | None = None
 
-    async def send_text_turn(self, text: str):
+    async def send_text_turn(self, text: str, use_llm: bool = False):
         """Inject a complete user phrasing + explicit reply request into the
         lane, bypassing STT (test hook). Goes through the real LLM+TTS path."""
         if self.bridge is None or self.bridge._context is None:
             raise RuntimeError("session has no context")
         ctx = self.bridge._context
-        ctx.messages.append({"role": "user", "content": text})
+        ctx.add_message({"role": "user", "content": text})
         if self.task is not None:
-            await self.task.queue_frame(LLMFullResponseStartFrame())
-            await self.task.queue_frame(TextFrame(text))
-            await self.task.queue_frame(LLMFullResponseEndFrame())
+            if use_llm:
+                await self.task.queue_frame(LLMContextFrame(ctx))
+            else:
+                await self.task.queue_frame(LLMFullResponseStartFrame())
+                await self.task.queue_frame(TextFrame(text))
+                await self.task.queue_frame(LLMFullResponseEndFrame())
 
 
 async def _announce_held(sess: MobileSession):
@@ -415,11 +405,16 @@ def require_token(request: Request):
 # (see delegation hermes-live-voice-mobile-fix1-20261027). A TURN
 # allocation the phone opens over TCP across the tunnel is a media path
 # that works. Credentials are minted per request (coturn REST scheme,
-# 1 h TTL); the shared secret lives in ~/.hermes/turn-auth-secret and is
-# never printed.
+# 1 h TTL); the shared secret lives in ~/.gemini/antigravity/voice/turn-auth-secret
+# (fallback ~/.hermes/turn-auth-secret) and is never printed.
 # --------------------------------------------------------------------------
-TURN_SECRET_FILE = Path.home() / ".hermes" / "turn-auth-secret"
-TURN_HOST = os.environ.get("MOBILE_TURN_HOST", "127.0.0.1")
+_AGY_TURN_SECRET = Path.home() / ".gemini" / "antigravity" / "voice" / "turn-auth-secret"
+TURN_SECRET_FILE = (
+    _AGY_TURN_SECRET
+    if _AGY_TURN_SECRET.exists()
+    else Path.home() / ".hermes" / "turn-auth-secret"
+)
+TURN_HOST = os.environ.get("MOBILE_TURN_HOST", "100.75.91.86")
 TURN_PORT = int(os.environ.get("MOBILE_TURN_PORT", "3478"))
 
 
@@ -496,6 +491,11 @@ async def icon512():
     return FileResponse(CLIENT_DIR / "icon-512.png", media_type="image/png")
 
 
+@app.get("/avatar.png")
+async def avatar():
+    return FileResponse(CLIENT_DIR / "avatar.png", media_type="image/png")
+
+
 @app.get("/apple-touch-icon.png")
 async def apple_icon():
     return FileResponse(CLIENT_DIR / "icon-192.png", media_type="image/png")
@@ -565,7 +565,7 @@ async def test_say(request: Request):
     text = str(body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text required")
-    await sess.send_text_turn(text)
+    await sess.send_text_turn(text, use_llm=bool(body.get("llm")))
     return {"status": "queued", "session_id": sess.id, "text": text}
 
 

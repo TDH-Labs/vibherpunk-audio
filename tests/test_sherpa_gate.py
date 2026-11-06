@@ -20,7 +20,7 @@ import sys
 
 os.environ["HERMES_WAKE_ENGINE"] = "sherpa"
 os.environ.setdefault("HERMES_VOICE_LOGDIR", "/tmp/hv-sherpa-gate-logs")
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 import numpy as np
 import scipy.io.wavfile

@@ -165,3 +165,10 @@ Commercial use of any kind is **not** covered by that license. That includes
 using the software inside a business or in a product, even if the software
 itself is given away for free. Commercial use requires a separate commercial
 license from the copyright holder. To ask about one, open an issue on this repository.
+
+## Current state — November 5, 2026
+
+- Two-tier shape: a fast talking lane (DeepSeek V4.1 Flash via Open Design) up front, and the Hermes agent on the Mac Studio as the back office — shell, files, web, memory — reached through the delegate tool. Back-office work routes by effort through Hermes' delegation tiers on the Open Design provider: Flash for everyday work, DeepSeek V4 Pro for heavy work, Gemini 4 Argon when the speaker asks for the big brain.
+- The face is now a red-and-white Australian Shepherd (client avatar and icons), and the voice is a cheerful Australian male clone (Pocket TTS, temperature 0.9), with a trailing-silence trimmer in the speech pipeline so replies don't trail dead air.
+- The client is a single calm screen: big avatar, one plain status line, Talk / Mute / Volume, and everything technical tucked into a Details drawer. Playback runs through an in-page gain stage, so the phone's volume buttons govern what you hear.
+- A phoneme/viseme cue track is generated per reply and emitted by the mobile server (viseme.py) for the animated-avatar work in progress; the live client still shows the still portrait.

@@ -6,7 +6,7 @@ import json
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 import hermes_voice as hv
 
@@ -14,8 +14,8 @@ SAMPLES = [
     "Please have Hermes read the first line of its SOUL file and tell me the exact words it finds there.",
     "Please have Hermes research the weather in Portland this weekend and summarize it.",
     "What city do I live in?",
-    "Send an email to Jordan about the Beaverton invoices.",
-    "Have Alex check the calendar for the office meeting tomorrow.",
+    "Send an email to Katrina about the Beaverton invoices.",
+    "Have Mia check the calendar for the Harwell meeting tomorrow.",
     "Ask the back office to open the RUNBOOK file on this Mac.",
 ]
 

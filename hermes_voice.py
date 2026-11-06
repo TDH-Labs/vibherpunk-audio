@@ -17,15 +17,15 @@ transport -> wake-word gate (HERMES_WAKE_ENGINE: oww | sherpa) -> Whisper STT
 lane LLM -> Pocket TTS (catalog voice) -> leading-silence trimmer ->
 speakers. Spoken failures for both tiers — no dead air. Spoken sleep ("go to sleep" / "stop listening") ends the window at once; worker results that land while the gate is asleep are held and announced first on the next wake.
 
-Run (from the repo root):  ./run.sh
+Run (from /Users/ai/workspace/hermes-voice):  ./run.sh
 Env knobs: LANE_MODEL (default glm-5.3-flash), LANE_BASE_URL,
-HERMES_LANE_BACKEND (relay|local; local = routed lane on a local MLX model —
-LOCAL_LANE_MODEL / LOCAL_LANE_BASE_URL — with the quick_lookup third exit),
-HERMES_WORKER_URL (default http://127.0.0.1:8642/v1), HERMES_WAKE=off, HERMES_WAKE_ENGINE=oww|sherpa,
+AGY_WORKER_URL / HERMES_WORKER_URL (default http://127.0.0.1:8011/v1),
+AGY_WORKER_MODEL / HERMES_WORKER_MODEL (default gemini-3.1-pro-high),
+HERMES_WAKE=off, HERMES_WAKE_ENGINE=oww|sherpa,
 HERMES_WAKE_PHRASES, HERMES_WAKE_SENSITIVITY, HERMES_STT=mlx|faster, HERMES_WHISPER (faster-whisper model, default small),
 HERMES_VOICE (default eve), HERMES_FOLLOWUP_SECS (default 20).
-Keys come from the environment (run.sh exports them from the Hermes .env
-files); they are never printed or logged here.
+Keys come from the environment (run.sh exports them from ~/.gemini/antigravity/voice/.env);
+they are never printed or logged here.
 """
 import asyncio
 import json
@@ -47,7 +47,6 @@ from pipecat.frames.frames import (
     ErrorFrame,
     InputAudioRawFrame,
     InterruptionFrame,
-    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMTextFrame,
     MetricsFrame,
@@ -56,6 +55,7 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSSpeakFrame,
     TTSStartedFrame,
+    TTSStoppedFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
@@ -77,63 +77,26 @@ from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransp
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = Path(os.environ.get("HERMES_VOICE_LOGDIR", str(BASE_DIR / "logs")))
 
-LANE_BASE_URL = os.environ.get("LANE_BASE_URL", "https://opencode.ai/zen/go/v1")
-# Measured on this route 2026-10-27 (direct streaming, ~125-token prompt):
-# deepseek-v4.1-flash TTFT median 1,551 ms; glm-5.3-flash 434 ms. The lane
-# default follows the measurement; LANE_MODEL overrides.
-LANE_MODEL = os.environ.get("LANE_MODEL", "glm-5.3-flash")
+LANE_BASE_URL = os.environ.get(
+    "LANE_BASE_URL", "https://amr-link.open-design.ai/v1"
+)
+# Routed via the Open Design API (OpenAI-compatible, amr-link.open-design.ai):
+# deepseek-v4.1-flash with reasoning off; LANE_MODEL / LANE_REASONING_EFFORT override.
+LANE_MODEL = os.environ.get("LANE_MODEL", "deepseek-v4.1-flash")
+LANE_REASONING_EFFORT = os.environ.get("LANE_REASONING_EFFORT", "none")
 LANE_SESSION_ID = os.environ.get(
     "LANE_SESSION", f"hermes-voice-lane-{uuid.uuid4().hex[:12]}"
 )
-# Lane backend: "relay" (default — the OpenCode Zen route above; the
-# unchanged production behavior and the rollback), "local" (a fast
-# non-reasoning model served on this machine over MLX), or "cloud" (the
-# routed configuration — routed prompt, three exits — with the talker on
-# the Zen route: GLM-5.3-Flash called directly). "local" and "cloud" are
-# the routed backends; "relay" stays byte-for-byte the rollback.
-LANE_BACKEND = os.environ.get("HERMES_LANE_BACKEND", "relay").strip().lower()
-ROUTED_BACKENDS = ("local", "cloud")
-# Token budget for the lane's carried conversation history on the routed
-# backends (the routed system prompt + tool schemas ride on top — 1,269
-# prompt tokens measured for a fresh routed call). Round 1's ack spikes
-# tracked context growth, so the cap keeps talker TTFT flat on long
-# conversations.
-LANE_CONTEXT_TOKEN_BUDGET = int(
-    os.environ.get("HERMES_LANE_CONTEXT_TOKEN_BUDGET", "2200")
+WORKER_BASE_URL = (
+    os.environ.get("AGY_WORKER_URL")
+    or os.environ.get("HERMES_WORKER_URL")
+    or "http://127.0.0.1:8642/v1"
 )
-# Fused lookup tool (round-2 amendment): when on, the routed lanes expose
-# a single lookup_or_delegate tool instead of quick_lookup. The API-level
-# diagnostic proved the two-call lookup->escalate chain fails even on a
-# strong talker (GLM spoke the hand-off sentence with no dispatch behind
-# it on the exact round-1 inputs), so the chain is collapsed into one
-# model decision: the tool looks up, and on a miss dispatches itself.
-FUSED_LOOKUP = os.environ.get("HERMES_FUSED_LOOKUP", "off").strip().lower() == "on"
-LOCAL_LANE_BASE_URL = os.environ.get(
-    "LOCAL_LANE_BASE_URL", "http://127.0.0.1:8123/v1"
+WORKER_MODEL = (
+    os.environ.get("AGY_WORKER_MODEL")
+    or os.environ.get("HERMES_WORKER_MODEL")
+    or "gemini-3.1-pro-high"
 )
-LOCAL_LANE_MODEL = os.environ.get(
-    "LOCAL_LANE_MODEL", "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-)
-LOOKUP_BUDGET_SECS = float(os.environ.get("HERMES_LOOKUP_BUDGET_SECS", "0.6"))
-# Routing mechanism for the local lane: "inband" (the lane model decides
-# the exit inside its single call) or "encoder" (an encoder classifier —
-# ModernBERT zero-shot, one forward pass, no generated tokens — decides
-# the exit on the final transcript and hands it to the lane as a decided
-# directive). Benches decide; see the delegation REPORT.
-ROUTING_MODE = os.environ.get("HERMES_ROUTING", "inband").strip().lower()
-ENCODER_MODEL = os.environ.get(
-    "HERMES_ENCODER_MODEL", "MoritzLaurer/ModernBERT-base-zeroshot-v2.0"
-)
-GLINER_MODEL = os.environ.get(
-    "HERMES_GLINER_MODEL", "urchade/gliner_medium-v2.1"
-)
-MEMORY_DIR = Path(
-    os.environ.get(
-        "HERMES_MEMORY_DIR", str(Path.home() / ".hermes" / "memories")
-    )
-)
-WORKER_BASE_URL = os.environ.get("HERMES_WORKER_URL", "http://127.0.0.1:8642/v1")
-WORKER_MODEL = os.environ.get("HERMES_WORKER_MODEL", "hermes-agent")
 VOICE = os.environ.get("HERMES_VOICE", "eve")
 WHISPER_MODEL = os.environ.get("HERMES_WHISPER", "small")
 STT_ENGINE = os.environ.get("HERMES_STT", "mlx")
@@ -142,7 +105,7 @@ FOLLOWUP_SECS = float(os.environ.get("HERMES_FOLLOWUP_SECS", "20"))
 PENDING_FOLLOWUP_SECS = 120.0
 WAKE_MODEL_PATH = os.environ.get(
     "HERMES_WAKE_MODEL",
-    os.path.expanduser("~/.hermes/hermes-agent/tools/wakewords/hey_hermes.tflite"),
+    "/Users/ai/.gemini/antigravity/voice/hey_hermes.tflite",
 )
 # Wake engine: "oww" (default — pyopen-wakeword + WAKE_MODEL_PATH, the
 # original behavior) or "sherpa" (sherpa-onnx open-vocabulary KWS over
@@ -165,62 +128,140 @@ WAKE_PHRASES = [
 # fired. Both count as the same wake phrase ("hey viber").
 SHERPA_PHRASE_VARIANTS = {"hey viber": ("HEY VIBER", "HEY VIBAR")}
 
-LANE_SYSTEM_PROMPT = """You are Vibherpunk, speaking out loud with the user on their Mac. You are the fast conversation lane of a two-tier system: you handle the conversation; a full agent — with tools, memory, and files — is your back office for real work.
+LANE_SYSTEM_PROMPT = """You are Vibherpunk, speaking out loud with Adam on his Mac. You are the fast conversation lane of a two-tier system: you handle live voice turns; a full back-office agent — with tools, memory, and files — handles real execution work.
 
-How you talk:
-- Short, natural spoken sentences, one or two at a time. No lists, no markdown, no code, nothing read aloud that only makes sense written.
-- If a message starts with "hey Clanker" or "hey Viber," that's just the wake phrase. Ignore it and answer the rest.
+Personality — Australian shepherd energy, a light touch:
+- Easygoing and dry. Warm without gushing; humor understated, never forced.
+- Plain Aussie turns of phrase in small doses: "no worries", "too easy", "fair enough", "reckon". An occasional "mate" is fine. One in a reply at most, never a caricature, and drop the slang entirely when the matter is serious.
+- Loyal and practical, like the dog: if Adam needs it done, you get it done; if something goes wrong you stay unflustered, say what happened plainly, and say what you are doing about it.
+- The hard rules below still win: substance first, no flattery, no filler openers.
 
-What you answer yourself: chat, small talk, simple general-knowledge questions, and follow-ups about this conversation. Answer those directly and briefly.
+Voice & Anti-Slop Discipline (Hard Rules):
+- Direct, concise, plain-English operator cadence. Speak in one or two crisp spoken sentences at a time.
+- Zero throat-clearing or filler openers: never open with "Certainly!", "Sure!", "Of course!", "Absolutely!", "Great question!", "I'd be happy to help", "Let's dive in", or "Here's a breakdown". Start with the substance on word one.
+- Zero sycophancy or flattery. Never compliment the question or use corporate AI buzzwords.
+- Zero markdown or written formatting read aloud: no bullet lists, no numbered lists, no asterisks, no backticks, no code syntax, no raw URLs.
+- If an utterance starts with "hey Clanker" or "hey Viber," treat it as the wake phrase, ignore it, and answer the remainder directly.
 
-Delegating — this is a hard rule, not a style tip:
-- Anything that needs the user's real data or real work — his memory, files, calendar, messages, accounts, the web, research, or any multi-step task — is not yours to answer. Call delegate_to_hermes with a clear, self-contained task description. The back office does not hear this conversation, so include everything it needs.
-- A spoken promise without a dispatch is a failure: if you say you are checking something, you must actually have called delegate_to_hermes.
-- You never know what the back office will find. Never state a result, a fact about the user, or an outcome you have not been given. Never guess what a finished job probably found.
-- When you dispatch, say one short sentence about what you handed off — process only, no promised result. For example: "I've asked my back office to check its memory for that — it'll take a bit."
-- Job results are announced in the conversation when they land, in the back office's own summary. If the user asks about a result afterwards, use only what was announced. If a result contradicts something you said earlier, correct yourself plainly.
-- If the user asks whether something is done, call check_delegated_jobs and answer from that — "still working" only when it actually is.
-- If the user presses you for a result that is not back yet, hold the line warmly and briefly: it's still with the back office, and you'll say it the moment it lands. Do not cave, and do not invent.
+What you answer yourself: direct conversation, quick questions, general knowledge, and follow-ups about this session. Answer plainly and briefly.
 
-You have no other tools and no memory of the user beyond this conversation. Anything that needs one goes to the back office."""
+Delegating — hard operational rule:
+- Anything requiring Adam's real data or execution — his memory, files, calendar, messages, accounts, the web, research, or any multi-step task — is not yours to answer. Call delegate_to_hermes with a clear, self-contained task description. The back office does not hear this conversation, so include all required context.
+- A spoken promise without a dispatch is a failure: if you say you are checking or running something, you must call delegate_to_hermes in the same turn.
+- If Adam tells you to use the big brain or the frontier model for a task, or to keep a task cheap, keep his words in the task description you pass to delegate_to_hermes — the back office routes on them.
+- Never fabricate or guess what the back office will find. Never state a result, a fact about Adam, or an outcome you have not been given.
+- When you dispatch, state what you handed off in one short sentence — process only, no promised outcome. Example: "Handed that to the back office to check your calendar."
+- Job results are announced in the conversation when they finish. If Adam asks about a result afterward, use only what was announced. If an announced result contradicts something you said earlier, correct yourself plainly.
+- If Adam asks whether a task is done, call check_delegated_jobs and report its actual state — say "still running" only when it actually is.
+- If Adam presses for a result that has not landed yet, hold the line plainly: it is still running in the back office and you will read it out the moment it finishes.
 
-LANE_SYSTEM_PROMPT_ROUTED = """You are Vibherpunk, speaking out loud with the user on their Mac. You are the fast conversation lane of a two-tier system: you handle the conversation; a full agent — with tools, memory, and files — is your back office for real work.
+You have no other tools and no memory of Adam beyond this conversation. Anything that needs one goes to the back office."""
 
-How you talk:
-- Short, natural spoken sentences, one or two at a time. No lists, no markdown, no code, nothing read aloud that only makes sense written.
-- If a message starts with "hey Clanker" or "hey Viber," that's just the wake phrase. Ignore it and answer the rest.
-
-Every turn takes exactly one of three exits. Choose inside this one reply. A short system note may follow the user's words naming the exit decided for this turn (for example "[Routing decision: LOOKUP …]"). That note is authoritative — take that exit. When it names a tool, that tool call is your first action, before any spoken words.
-
-1. ANSWER — chat, small talk, simple general-knowledge questions, and follow-ups about this conversation. Answer directly and briefly.
-
-2. LOOK UP — exactly one stored fact about the user or their setup: where they live, their timezone, a name, how his machine or agents are set up — the kind of thing kept in local memory. Call quick_lookup with a short query of content words (for example "city lives in" or "timezone"). It returns stored passages with their source. Say the fact only if a passage directly states it, briefly and as stored. If it finds nothing, or the passages don't actually state the fact, do NOT fill the gap from your own knowledge — delegate instead (exit 3).
-
-3. DELEGATE — anything needing real work or live data beyond a single stored fact: files, calendar, messages, accounts, the web, research, several facts at once, exact file contents, or any multi-step task. Call delegate_to_hermes with a clear, self-contained task description. The back office does not hear this conversation, so include everything it needs. Names and file names are load-bearing: pass them verbatim. The user's agent persona file is SOUL.md — if the transcript says "sole file" or "soul file", they mean SOUL.md; write SOUL.md in the task.
-
-Delegating — this is a hard rule, not a style tip:
-- A spoken promise without a dispatch is a failure: if you say you are checking something, you must actually have called delegate_to_hermes.
-- You never know what the back office will find. Never state a result, a fact about the user, or an outcome you have not been given — not from a lookup that missed, not from a job still running. Never guess what a finished job probably found.
-- When you dispatch, say one short sentence about what you handed off — process only, no promised result. For example: "I've asked my back office to check its memory for that — it'll take a bit."
-- Job results are announced in the conversation when they land, in the back office's own summary. If the user asks about a result afterwards, use only what was announced. If a result contradicts something you said earlier, correct yourself plainly.
-- If the user asks whether something is done, call check_delegated_jobs and answer from that — "still working" only when it actually is.
-- If the user presses you for a result that is not back yet, hold the line warmly and briefly: it's still with the back office, and you'll say it the moment it lands. Do not cave, and do not invent.
-
-You have no other tools and no memory of the user beyond this conversation and what quick_lookup returns. Anything that needs more goes to the back office."""
-
-WORKER_DISPATCH_TEMPLATE = """A request came in over live voice. Do the work fully — use your tools and memory as needed — then report the outcome.
+WORKER_DISPATCH_TEMPLATE = """A request came in over live voice. Execute the work fully — using your tools and memory as needed — then report the concrete outcome.
 
 Request: {task}
 
-Format: give your normal, complete answer first. Then, on its own final line, add exactly:
-SPOKEN SUMMARY: <one to three short sentences, written to be read aloud, stating the actual outcome>"""
+Anti-Slop Voice Rules for SPOKEN SUMMARY:
+- Use direct, plain-English operator cadence. Lead with the outcome on word one.
+- Never use throat-clearing openers ("Certainly", "Great question", "I'd be happy to help", "Let's dive in", "Here's a breakdown") or sycophancy.
+- Do not include markdown, bullet points, numbered lists, code syntax, or raw URLs in the spoken summary.
+
+Format: give your complete written answer first. Then, on its own final line, add exactly:
+SPOKEN SUMMARY: <one to three short sentences, written to be spoken aloud in plain English, stating the actual outcome>"""
+
+# --------------------------------------------------------------------------
+# Back-office routing (2026-11-05) — her delegated jobs engage Hermes'
+# delegation machinery (delegate_task + the model_map options in
+# ~/.hermes/config.yaml) instead of executing inline on the gateway front
+# door's own model. Seats live in that config (Adam's provider + price
+# decisions, 2026-11-05; all via his OpenDesign Plus plan):
+#   eco      = deepseek-v4.1-flash  (everyday seat, cheapest on the platform)
+#   heavy    = deepseek-v4-pro      (coding / architecture / financial)
+#   frontier = gemini-4-argon       (hardest work, spoken overrides)
+# The gateway session is the routing desk: it executes nothing itself; it
+# hands the job to one subagent at the chosen seat, escalates a seat on
+# failure, and relays the result.
+# --------------------------------------------------------------------------
+ROUTE_ECO = "eco"
+ROUTE_HEAVY = "heavy"
+ROUTE_FRONTIER = "frontier"
+ROUTE_SELF = "self"  # front door executes directly — memory writes only
+
+# Escalation ladders: start seat -> the seats above it, in order.
+_ROUTE_LADDERS = {
+    ROUTE_ECO: (ROUTE_ECO, ROUTE_HEAVY, ROUTE_FRONTIER),
+    ROUTE_HEAVY: (ROUTE_HEAVY, ROUTE_FRONTIER),
+    ROUTE_FRONTIER: (ROUTE_FRONTIER,),
+}
+
+ROUTING_DESK_TEMPLATE = """A request came in over live voice. You are the back-office routing desk for this request, not the worker. Do NOT execute the request yourself, and do not call any tool other than delegate_task.
+
+Hand the request to ONE subagent: call delegate_task with a single task whose option is "{option}", passing the text between the REQUEST markers below as the subagent's goal, in full, including the output-format instructions at the end of it.
+
+Escalation ladder for this request: {ladder}. If delegate_task returns an error, or the subagent's result says it failed, was blocked, or could not complete the work, call delegate_task again with the same goal at the next seat up the ladder — even when the first result explains the failure; the stronger seat re-checks it. Move up one seat per failure; frontier is the top — a failure there is final. One exception: when the result demonstrates a hard system barrier that no model can change (a system-protected or read-only location, SIP, a permission no agent here holds), do not escalate — return that result as the final answer. A result that answers the request — even when the answer is "not found" or "no" — is a completed result, not a failure; do not re-delegate those. If the final attempt fails, return a short failure report in the same format the request's output instructions require (complete written answer, then the SPOKEN SUMMARY line) stating plainly that the back office could not complete the task.
+
+When a subagent's result reaches you, return it as your entire final answer, unedited — no introduction and no commentary before or after it.
+
+=== REQUEST ===
+{worker_prompt}
+=== END REQUEST ==="""
+
+_FRONTIER_OVERRIDE = (
+    "big brain", "frontier", "best model", "strongest model",
+    "smartest model", "most powerful", "full power", "opus", "argon",
+)
+_CHEAP_OVERRIDE = (
+    "keep it cheap", "keep this cheap", "cheap model", "economical",
+    "dont spend", "do not spend", "save money", "quick and cheap",
+)
+_HEAVY_SIGNALS = (
+    # coding / debugging / building
+    "code", "coding", "program", "script", "debug", "refactor", "function",
+    "compile", "unit test", "fix the bug", "build an app", "build a tool",
+    # architecture / design
+    "architect", "system design", "design a system", "design the system",
+    # financial
+    "reconcil", "payroll", "quickbooks", "ledger", "financial statement",
+    # security / hard review
+    "security review", "vulnerabilit", "adversarial review", "audit the",
+)
+
+
+def _classify_route(task: str) -> tuple[str, str]:
+    """Pick the back-office route for one delegated job -> (route, why).
+
+    Spoken overrides beat inference. Memory writes stay with the front door:
+    Hermes blocks the memory tool for subagents (a core write guard), so a
+    remember-this job is the one class the front door executes itself.
+    """
+    t = " " + re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", task.lower())) + " "
+    if any(p in t for p in _FRONTIER_OVERRIDE):
+        return ROUTE_FRONTIER, "spoken frontier override"
+    if any(p in t for p in _CHEAP_OVERRIDE):
+        return ROUTE_ECO, "spoken cheap override"
+    words = t.split()
+    if words and words[0] == "remember":
+        return ROUTE_SELF, "memory write (subagents cannot write memory)"
+    if any(v in t for v in ("save ", "add ", "store ", "update ")) and "memory" in t:
+        return ROUTE_SELF, "memory write (subagents cannot write memory)"
+    hits = [p for p in _HEAVY_SIGNALS if p in t]
+    if hits:
+        return ROUTE_HEAVY, f"heavy class: {hits[0]}"
+    return ROUTE_ECO, "default economical"
+
+
+def _ladder_text(route: str) -> str:
+    seats = _ROUTE_LADDERS[route]
+    if len(seats) == 1:
+        return "frontier — this request starts at the top seat; there is no higher seat"
+    return ", then ".join(seats)
+
 
 WORKER_DOWN_MESSAGE = (
-    "Sorry — Vibherpunk couldn't complete that task. "
-    "The agent seems to be unreachable right now."
+    "Back-office worker unreachable. Task could not be completed."
 )
 LANE_DOWN_MESSAGE = (
-    "Sorry, I'm having trouble reaching my conversation model right now."
+    "Voice lane model unreachable right now."
 )
 SLEEP_CONFIRMATION = "Going to sleep — say hey Clanker when you need me."
 
@@ -240,15 +281,7 @@ class Session:
         self.turns: list[dict] = []
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self._log_path = LOG_DIR / "metrics.jsonl"
-        self.record(
-            "session_init",
-            lane_model=(
-                LOCAL_LANE_MODEL if LANE_BACKEND == "local" else LANE_MODEL
-            ),
-            lane_backend=LANE_BACKEND,
-            routing=ROUTING_MODE,
-            stt=STT_ENGINE,
-        )
+        self.record("session_init", lane_model=LANE_MODEL, stt=STT_ENGINE)
 
     def record(self, kind: str, **data):
         evt = {"kind": kind, "wall": time.time(), "mono": time.monotonic(), **data}
@@ -336,6 +369,78 @@ class LeadingSilenceTrimmer(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+
+class TrailingSilenceTrimmer(FrameProcessor):
+    """Drop silent frames at the tail of each TTS utterance (Pocket streams
+    carry ~0.35 s of trailing silence after EOS — a dead hang if played).
+    Silent frames are held back up to HOLD_MS; if speech resumes they flush,
+    so natural mid-sentence pauses survive untouched. Whatever silence is
+    still held when the utterance stops is dropped."""
+
+    THRESHOLD = 300.0  # int16 RMS — same measured floor as the leading trimmer
+    HOLD_MS = 500
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._held = []
+        self._held_ms = 0
+        self.dropped_ms = 0
+
+    @staticmethod
+    def _rms(frame) -> float:
+        arr = np.frombuffer(frame.audio, dtype=np.int16)
+        if not len(arr):
+            return 0.0
+        return float(np.sqrt(np.mean(arr.astype(np.float64) ** 2)))
+
+    async def _flush(self, direction):
+        for f in self._held:
+            await self.push_frame(f, direction)
+        self._held = []
+        self._held_ms = 0
+
+    def _drop_held(self):
+        if self._held:
+            self.dropped_ms += self._held_ms
+            logger.debug(
+                f"trimmer: dropped {self._held_ms} ms trailing silence"
+            )
+            self._held = []
+            self._held_ms = 0
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if direction != FrameDirection.DOWNSTREAM:
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, TTSAudioRawFrame):
+            if self._rms(frame) < self.THRESHOLD:
+                ms = int(len(frame.audio) // 2 / frame.sample_rate * 1000)
+                self._held.append(frame)
+                self._held_ms += ms
+                while self._held_ms > self.HOLD_MS and len(self._held) > 1:
+                    f = self._held.pop(0)
+                    self._held_ms -= int(
+                        len(f.audio) // 2 / f.sample_rate * 1000
+                    )
+                    await self.push_frame(f, direction)
+                return
+            await self._flush(direction)
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, (TTSStoppedFrame, InterruptionFrame)):
+            self._drop_held()
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, TTSStartedFrame):
+            self._drop_held()
+            await self.push_frame(frame, direction)
+            return
+        if self._held:
+            await self._flush(direction)
+        await self.push_frame(frame, direction)
+
+
 class SpokenFailureAnnouncer(FrameProcessor):
     """Speak the failure when the lane LLM errors, instead of dead air.
     Pipecat services push ErrorFrames UPSTREAM, so this sits BEFORE the lane
@@ -348,6 +453,10 @@ class SpokenFailureAnnouncer(FrameProcessor):
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM and isinstance(
+            frame, (VADUserStoppedSpeakingFrame, TranscriptionFrame)
+        ):
+            self._announced = False
         if (
             isinstance(frame, ErrorFrame)
             and direction == FrameDirection.UPSTREAM
@@ -692,16 +801,12 @@ class DelegationBridge:
         self._gate = None  # WakeWordGate, attached by the pipeline builder
         self.held: list[dict] = []  # results completed while the gate slept
         self.sleep_processor = None  # SleepCommandProcessor (builder-wired)
-        self.anticipator = None  # Anticipator, attached by the builder
 
     def attach_worker(self, worker):
         self._worker = worker
 
     def attach_gate(self, gate):
         self._gate = gate
-
-    def attach_anticipator(self, anticipator):
-        self.anticipator = anticipator
 
     def pending_count(self) -> int:
         return sum(1 for j in self.jobs.values() if j["status"] == "running")
@@ -726,10 +831,10 @@ class DelegationBridge:
             "job_id": job_id,
             "status": "dispatched",
             "note": (
-                "Your back office is working on this in the background. Acknowledge "
-                "briefly (process only). Do NOT state any result — the "
-                "actual result will be announced in this conversation when "
-                "it finishes."
+                "Back office is running this task in the background. Acknowledge "
+                "briefly in one short sentence (process only, no filler). Do NOT "
+                "state or guess any result — the actual outcome will be announced "
+                "when it finishes."
             ),
         }
 
@@ -748,7 +853,18 @@ class DelegationBridge:
         return {"jobs": out}
 
     async def _run(self, job: dict):
-        prompt = WORKER_DISPATCH_TEMPLATE.format(task=job["task"])
+        route, why = _classify_route(job["task"])
+        job["route"] = route
+        worker_prompt = WORKER_DISPATCH_TEMPLATE.format(task=job["task"])
+        if route == ROUTE_SELF:
+            prompt = worker_prompt
+        else:
+            prompt = ROUTING_DESK_TEMPLATE.format(
+                option=route,
+                ladder=_ladder_text(route),
+                worker_prompt=worker_prompt,
+            )
+        self._session.record("route", job_id=job["id"], route=route, why=why)
         try:
             text, usage = await self._call_worker(prompt)
         except Exception as e:
@@ -819,7 +935,7 @@ class DelegationBridge:
             self._note_context(
                 f"[Update: the background task \"{job['task'][:80]}\" is DONE. "
                 f"Result announced to the user: \"{summary}\" "
-                "If the user asks about it, use only this announced result.]"
+                "If Adam asks about it, use only this announced result.]"
             )
         return False
 
@@ -840,18 +956,39 @@ class DelegationBridge:
             await self._speak(it["announce"])
             self._note_context(
                 "[Update: a result that was held while the user was away has "
-                f"now been announced: \"{it['announce']}\" If the user asks "
+                f"now been announced: \"{it['announce']}\" If Adam asks "
                 "about it, use only this announced result.]"
             )
 
-    @staticmethod
-    def _spoken_summary(text: str) -> str:
+    _SLOP_OPENER_RE = re.compile(
+        r"^(?:certainly|sure(?:\s+thing)?|of\s+course|absolutely|great\s+question|"
+        r"i'?d\s+be\s+happy\s+to\s+help(?:\s+with\s+that)?|"
+        r"let'?s\s+dive\s+(?:right\s+)?in|here'?s\s+a\s+breakdown[^.!:]*)[.!:,—\-\s]+",
+        flags=re.IGNORECASE,
+    )
+
+    @classmethod
+    def _clean_spoken_text(cls, raw: str) -> str:
+        s = re.sub(r"[*_`#]+", "", raw)
+        s = re.sub(r"(?m)^\s*[-•]\s+", "", s)
+        s = " ".join(s.split()).strip()
+        while True:
+            nxt = cls._SLOP_OPENER_RE.sub("", s).strip()
+            if nxt == s or not nxt:
+                break
+            s = nxt
+        return s
+
+    @classmethod
+    def _spoken_summary(cls, text: str) -> str:
         m = re.search(r"SPOKEN SUMMARY:\s*(.+)", text, flags=re.DOTALL)
         if m:
-            return " ".join(m.group(1).split()).strip()
+            # A worker occasionally repeats its closing line; keep only the
+            # first summary so she never speaks it twice.
+            return cls._clean_spoken_text(m.group(1).split("SPOKEN SUMMARY:")[0])
         # Fallback: the worker's own first two sentences (its words, not a
         # lane paraphrase).
-        flat = " ".join(text.split()).strip()
+        flat = cls._clean_spoken_text(text)
         parts = re.split(r"(?<=[.!?])\s+", flat)
         return " ".join(parts[:2])[:500] if parts else flat[:500]
 
@@ -889,23 +1026,31 @@ class DelegationBridge:
                 if r.status != 200:
                     body = (await r.text())[:200]
                     raise RuntimeError(f"worker HTTP {r.status}: {body}")
+                pending = b""
+                done = False
                 async for raw in r.content:
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
+                    pending += raw
+                    while b"\n" in pending and not done:
+                        rawline, pending = pending.split(b"\n", 1)
+                        line = rawline.decode("utf-8", "ignore").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            done = True
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except Exception:
+                            continue
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+                        for ch in chunk.get("choices", []):
+                            delta = ch.get("delta", {})
+                            if delta.get("content"):
+                                text_parts.append(delta["content"])
+                    if done:
                         break
-                    try:
-                        chunk = json.loads(data)
-                    except Exception:
-                        continue
-                    if chunk.get("usage"):
-                        usage = chunk["usage"]
-                    for ch in chunk.get("choices", []):
-                        delta = ch.get("delta", {})
-                        if delta.get("content"):
-                            text_parts.append(delta["content"])
         return "".join(text_parts).strip(), usage
 
 
@@ -1040,8 +1185,9 @@ class TurnTap(FrameProcessor):
 
 
 class TextTap(FrameProcessor):
-    """Between the lane LLM and TTS: lane first-token timing, lane token
-    usage, and the spoken transcript (lane text + injected speak frames)."""
+    """Between the lane LLM and TTS: strips markdown characters from streamed
+    tokens, records lane first-token timing, lane token usage, and the spoken
+    transcript (lane text + injected speak frames)."""
 
     def __init__(self, session: Session, **kwargs):
         super().__init__(**kwargs)
@@ -1052,6 +1198,7 @@ class TextTap(FrameProcessor):
         await super().process_frame(frame, direction)
         if direction == FrameDirection.DOWNSTREAM:
             if isinstance(frame, LLMTextFrame):
+                frame.text = re.sub(r"[*_`#]+", "", frame.text)
                 if self._session.turn is not None and self._session.turn.get("t_first_token") is None:
                     self._session.turn["t_first_token"] = time.monotonic()
                 self._buf.append(frame.text)
@@ -1094,98 +1241,6 @@ class SoundTap(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def _estimate_tokens(msg) -> int:
-    """Rough token estimate for one context message (~4 chars/token)."""
-    if not isinstance(msg, dict):
-        return 8
-    total = 8
-    content = msg.get("content")
-    if isinstance(content, str):
-        total += len(content) // 4
-    for tc in msg.get("tool_calls") or []:
-        fn = tc.get("function") or {}
-        total += len(str(fn.get("arguments", ""))) // 4 + 8
-    return total
-
-
-def _cap_context_tokens(msgs: list, budget: int) -> list | None:
-    """Enforce a token budget on carried history. Returns the capped
-    message list, or None if already within budget. Rules: truncate any
-    single oversized message (worker summaries are the fat ones) except
-    the latest; keep only the newest routing-directive note; then drop
-    oldest whole turn-units (an assistant tool-call message stays glued
-    to its tool results) until under budget; never orphan a tool result
-    at the head."""
-    total = sum(_estimate_tokens(m) for m in msgs)
-    if total <= budget:
-        return None
-    out = []
-    last_directive = max(
-        (
-            i
-            for i, m in enumerate(msgs)
-            if isinstance(m, dict)
-            and m.get("role") == "system"
-            and isinstance(m.get("content"), str)
-            and m["content"].startswith("[Routing decision:")
-        ),
-        default=-1,
-    )
-    for i, m in enumerate(msgs):
-        if (
-            isinstance(m, dict)
-            and m.get("role") == "system"
-            and isinstance(m.get("content"), str)
-            and m["content"].startswith("[Routing decision:")
-            and i != last_directive
-        ):
-            continue
-        if (
-            i < len(msgs) - 1
-            and isinstance(m, dict)
-            and isinstance(m.get("content"), str)
-            and len(m["content"]) > 3600
-        ):
-            m = dict(m)
-            m["content"] = m["content"][:2400] + " …[trimmed for lane context]"
-        out.append(m)
-    # Group into units: assistant tool-call + its tool results stay glued.
-    units: list[list] = []
-    for m in out:
-        if (
-            isinstance(m, dict)
-            and m.get("role") == "tool"
-            and units
-            and any(
-                (u.get("tool_calls") if isinstance(u, dict) else None)
-                for u in units[-1]
-            )
-        ):
-            units[-1].append(m)
-        else:
-            units.append([m])
-    total = sum(_estimate_tokens(m) for u in units for m in u)
-    while total > budget and len(units) > 1:
-        dropped = units.pop(0)
-        total -= sum(_estimate_tokens(m) for m in dropped)
-    flat = [m for u in units for m in u]
-    while flat and isinstance(flat[0], dict) and flat[0].get("role") == "tool":
-        flat.pop(0)
-    return flat
-
-
-def _cap_context_in_place(context) -> None:
-    """Apply the routed lanes' context cap to a live LLMContext."""
-    try:
-        capped = _cap_context_tokens(
-            context.get_messages(), LANE_CONTEXT_TOKEN_BUDGET
-        )
-        if capped is not None:
-            context.set_messages(capped)
-    except Exception as e:
-        logger.warning(f"lane context cap failed: {e}")
-
-
 class ContextTrimmer(FrameProcessor):
     """Keeps the lane's rolling window small: cap context messages, never
     leaving an orphaned tool result at the head."""
@@ -1201,8 +1256,6 @@ class ContextTrimmer(FrameProcessor):
         await self.push_frame(frame, direction)
         if isinstance(frame, LLMFullResponseEndFrame):
             try:
-                if LANE_BACKEND in ROUTED_BACKENDS:
-                    _cap_context_in_place(self._context)
                 msgs = self._context.get_messages()
                 if len(msgs) > self.MAX_MESSAGES:
                     keep = msgs[-self.MAX_MESSAGES :]
@@ -1214,707 +1267,13 @@ class ContextTrimmer(FrameProcessor):
 
 
 # --------------------------------------------------------------------------
-# Quick lookup — bounded search over the Hermes default profile's local
-# memory files (MEMORY_DIR). Sourced facts only: it returns the stored
-# passages themselves, and a miss tells the lane to delegate, never guess.
-# --------------------------------------------------------------------------
-_LOOKUP_STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "do", "does", "did",
-    "what", "which", "who", "whom", "where", "when", "why", "how", "i",
-    "me", "my", "we", "our", "you", "your", "he", "his", "she", "her",
-    "it", "its", "of", "in", "on", "at", "to", "for", "and", "or", "be",
-    "been", "am", "have", "has", "had", "can", "could", "would", "tell",
-    "please", "know", "about", "hermes",
-}
-_LOOKUP_SYNONYMS = [
-    {"live", "lives", "lived", "living", "reside", "resides", "residing",
-     "located", "based", "home"},
-    {"timezone", "zone", "clock", "pacific", "pst", "pdt"},
-    {"name", "called", "named"},
-    {"wife", "spouse"},
-    {"voice", "tts", "speaks", "speaking", "speaker"},
-]
-_lookup_cache: dict = {"stamp": None, "chunks": []}
-
-
-def _lookup_tokens(text: str) -> list[str]:
-    return [
-        t
-        for t in re.findall(r"[a-z0-9']+", (text or "").lower())
-        if t not in _LOOKUP_STOPWORDS and len(t) > 1
-    ]
-
-
-def _lookup_chunks() -> list[dict]:
-    files = []
-    try:
-        files = sorted(MEMORY_DIR.glob("*.md"))
-    except Exception:
-        files = []
-    stamp = tuple(
-        (f.name, f.stat().st_mtime_ns, f.stat().st_size)
-        for f in files
-        if f.exists()
-    )
-    if _lookup_cache["stamp"] == stamp:
-        return _lookup_cache["chunks"]
-    chunks: list[dict] = []
-    for f in files:
-        try:
-            text = f.read_text(errors="ignore")
-        except Exception:
-            continue
-        for part in re.split(r"\n\s*§\s*\n|\n\s*\n", text):
-            flat = " ".join(part.split()).strip()
-            if len(flat) >= 25:
-                chunks.append({"source": f.name, "text": flat[:700]})
-    _lookup_cache["stamp"] = stamp
-    _lookup_cache["chunks"] = chunks
-    return chunks
-
-
-def _lookup_tok_score(qtok: str, ctoks: set) -> float:
-    if qtok in ctoks:
-        return 1.0
-    if len(qtok) >= 4:
-        for c in ctoks:
-            if len(c) >= 4 and (
-                c.startswith(qtok[:5]) or qtok.startswith(c[:5])
-            ):
-                return 0.7
-    for group in _LOOKUP_SYNONYMS:
-        if qtok in group and (group & ctoks):
-            return 0.8
-    return 0.0
-
-
-def quick_lookup_search(query: str) -> dict:
-    """Synchronous search. Returns candidate stored passages with sources,
-    or found=False. The lane decides relevance from the passages; it may
-    only state a fact a passage directly states."""
-    qtoks = set(_lookup_tokens(query))
-    if not qtoks:
-        return {
-            "found": False,
-            "note": (
-                "The lookup query had no searchable content words. Do NOT "
-                "guess — delegate_to_hermes instead."
-            ),
-        }
-    scored = []
-    for ch in _lookup_chunks():
-        ctoks = set(_lookup_tokens(ch["text"]))
-        score = sum(_lookup_tok_score(t, ctoks) for t in qtoks) / len(qtoks)
-        if score >= 0.30:
-            scored.append((score, ch))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    if not scored:
-        return {
-            "found": False,
-            "note": (
-                "No stored fact matched. Do NOT guess or answer about the user "
-                "from general knowledge — delegate_to_hermes instead."
-            ),
-        }
-    return {
-        "found": True,
-        "candidates": [
-            {
-                "text": ch["text"],
-                "source": ch["source"],
-                "match": "strong" if s >= 0.6 else "partial",
-            }
-            for s, ch in scored[:3]
-        ],
-        "note": (
-            "Stored memory passages that may answer. State a fact ONLY if a "
-            "passage directly states it; otherwise delegate_to_hermes. "
-            "Never add facts of your own."
-        ),
-    }
-
-
-async def run_quick_lookup(
-    query: str, session: Session, speculative: bool = False
-) -> dict:
-    t0 = time.monotonic()
-    try:
-        res = await asyncio.wait_for(
-            asyncio.to_thread(quick_lookup_search, query),
-            timeout=LOOKUP_BUDGET_SECS,
-        )
-    except asyncio.TimeoutError:
-        res = {
-            "found": False,
-            "note": (
-                "The lookup timed out. Do NOT guess — delegate_to_hermes "
-                "instead."
-            ),
-        }
-    ms = round((time.monotonic() - t0) * 1000)
-    session.record(
-        "lookup",
-        query=query[:120],
-        hit=bool(res.get("found")),
-        ms=ms,
-        speculative=speculative,
-        source=(res.get("candidates") or [{}])[0].get("source"),
-    )
-    res["lookup_ms"] = ms
-    return res
-
-
-# --------------------------------------------------------------------------
-# Anticipator v1 — transcript-layer speculation.
-#
-# Watches the user's turn as Whisper segment transcripts stream in (before
-# the turn closes). On a confident lookup shape it pre-runs quick_lookup;
-# on a delegation shape it pre-drafts the task text. It NEVER speaks and
-# NEVER dispatches: worker jobs fire only from the lane's own tool call on
-# the final transcript, and a prepared lookup is served only when the
-# lane's actual query still matches what was speculated on. Speculation
-# that doesn't match is discarded silently.
-# --------------------------------------------------------------------------
-class Anticipator:
-    LOOKUP_TOPICS = (
-        "city", "live", "lives", "reside", "located", "address", "timezone",
-        "time zone", "name", "called", "mia", "second brain", "voice",
-        "wife", "husband", "son", "daughter", "birthday", "phone", "email",
-        "profile", "profiles", "model", "provider", "wake",
-    )
-    QUESTION_STARTS = (
-        "what", "who", "where", "when", "which", "is ", "do ", "does ",
-        "tell me",
-    )
-    DELEGATE_MARKERS = (
-        "have hermes", "ask hermes", "back office", "take your time",
-        "research", "find out", "look up", "check ", "read the", "list ",
-        "send ", "book ", "write ", "summar", "first line",
-    )
-    MAX_AGE_SECS = 60.0
-
-    def __init__(self, session: Session):
-        self._session = session
-        self._text = ""
-        self._stamp = 0.0
-        self._lookup_task: asyncio.Task | None = None
-        self._lookup_text: str | None = None
-        self._draft: str | None = None
-        self._extractor = EntityExtractor()
-        self._pinned: dict[str, dict] = {}
-        self._extract_task: asyncio.Task | None = None
-        self._last_extract_len = 0
-
-    def observe(self, text: str):
-        # Speculation only exists to serve the routed lanes'
-        # quick_lookup; on the relay lane it could never be consumed, so
-        # the anticipator stays completely inert there.
-        if LANE_BACKEND not in ROUTED_BACKENDS:
-            return
-        text = (text or "").strip()
-        if not text:
-            return
-        now = time.monotonic()
-        if self._text and now - self._stamp > self.MAX_AGE_SECS:
-            self._text = ""
-            self._lookup_task = None
-            self._lookup_text = None
-            self._draft = None
-        self._stamp = now
-        # Keep a rolling window of the current turn's speech (segments
-        # arrive progressively; older turns fall out of the window and the
-        # match guards below require overlap with the FINAL query anyway).
-        self._text = (self._text + " " + text).strip()[-500:]
-        low = self._text.lower()
-        if any(m in low for m in self.DELEGATE_MARKERS):
-            self._draft = self._text
-        if self._lookup_task is None and self._looks_like_lookup(low):
-            self._lookup_text = self._text
-            self._lookup_task = asyncio.ensure_future(
-                run_quick_lookup(self._text, self._session, speculative=True)
-            )
-            self._session.record(
-                "anticipation", what="lookup_prepared", text=self._text[:160]
-            )
-        # Encoder span extraction over the partial transcript: throttled,
-        # off the critical path, fail-soft inside the extractor.
-        if (
-            self._extract_task is None
-            and len(self._text) - self._last_extract_len >= 12
-        ):
-            self._last_extract_len = len(self._text)
-            self._extract_task = asyncio.ensure_future(self._extract_async())
-
-    async def _extract_async(self):
-        try:
-            ents = await self._extractor.extract(self._text)
-            new = []
-            for e in ents:
-                key = e["text"].lower()
-                if e["score"] >= 0.55 and key not in self._pinned:
-                    self._pinned[key] = e
-                    new.append(e)
-            if new:
-                self._session.record("entity_pin", spans=new)
-        finally:
-            self._extract_task = None
-
-    def _looks_like_lookup(self, low: str) -> bool:
-        if not any(t in low for t in self.LOOKUP_TOPICS):
-            return False
-        return low.lstrip().startswith(self.QUESTION_STARTS) or "?" in low
-
-    async def take_lookup(self, query: str) -> dict | None:
-        """Serve the prepared lookup if the lane's real query still matches
-        the speculated turn text; else None (caller runs a fresh lookup)."""
-        if self._lookup_task is None or self._lookup_text is None:
-            return None
-        if time.monotonic() - self._stamp > self.MAX_AGE_SECS:
-            return None
-        qtoks = set(_lookup_tokens(query))
-        ttoks = set(_lookup_tokens(self._lookup_text))
-        if not qtoks or len(qtoks & ttoks) / len(qtoks) < 0.4:
-            return None
-        task, self._lookup_task = self._lookup_task, None
-        try:
-            res = await asyncio.wait_for(
-                asyncio.shield(task), timeout=LOOKUP_BUDGET_SECS
-            )
-        except Exception:
-            return None
-        self._session.record(
-            "anticipation", what="lookup", hit=True, query=query[:120]
-        )
-        return res
-
-    def note_delegation(self, task_text: str):
-        """A delegation fired on the final transcript: record whether a
-        matching pre-draft existed (preparation hit), and whether the
-        payload carries the pinned entity spans verbatim (a missing span
-        is either an ASR hearing error pinned upstream or a lane copying
-        error — the pin came from the transcript, so the two are
-        distinguishable in review). The dispatch itself always uses the
-        lane's own final arguments."""
-        if self._pinned:
-            low = task_text.lower()
-            missing = [s for s in self._pinned if s not in low]
-            self._session.record(
-                "anticipation",
-                what="entity_check",
-                pinned=len(self._pinned),
-                missing=missing,
-            )
-        if not self._draft:
-            return
-        draft, self._draft = self._draft, None
-        dtoks = set(_lookup_tokens(draft))
-        ftoks = set(_lookup_tokens(task_text))
-        if ftoks and len(dtoks & ftoks) / len(ftoks) >= 0.4:
-            self._session.record(
-                "anticipation", what="delegation_draft", hit=True
-            )
-
-
-class AnticipatorTap(FrameProcessor):
-    """Between the transcription tap and the user aggregator: feeds each
-    Whisper segment transcript to the Anticipator. Pass-through — it emits
-    nothing of its own."""
-
-    def __init__(self, anticipator: Anticipator, **kwargs):
-        super().__init__(**kwargs)
-        self._anticipator = anticipator
-
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if (
-            isinstance(frame, TranscriptionFrame)
-            and direction == FrameDirection.DOWNSTREAM
-        ):
-            try:
-                self._anticipator.observe(frame.text)
-            except Exception as e:
-                logger.warning(f"anticipator observe failed: {e}")
-        await self.push_frame(frame, direction)
-
-
-# --------------------------------------------------------------------------
-# Encoder routing (alternative to in-generation routing) + GLiNER spans.
-#
-# IntentClassifier: a zero-shot encoder classifier (ModernBERT class) —
-# one batched forward pass over the three exit labels, no generated
-# tokens, deterministic argmax. EncoderRouterTap runs it on the completed
-# user turn and injects the decided exit into the context as a system
-# note; the lane still authors all language and tool arguments.
-#
-# EntityExtractor: GLiNER zero-shot span extraction over partial
-# transcripts. Pinned spans give the delegation path verified text and
-# separate ASR hearing errors (span wrong in the transcript) from lane
-# copying errors (span right in the transcript, wrong in the payload).
-# Both components fail soft: any load/inference error disables them and
-# the system falls back to in-generation routing + pattern anticipation.
-# --------------------------------------------------------------------------
-class IntentClassifier:
-    LABELS = [
-        ("answer", "This is casual conversation or a general knowledge question."),
-        (
-            "lookup",
-            "This is a question about the user's own personal information "
-            "or stored details.",
-        ),
-        (
-            "delegate",
-            "This is a request for the assistant to do something, check "
-            "something, or find something out.",
-        ),
-    ]
-
-    def __init__(self):
-        self._pipe = None
-        self._failed = False
-
-    def _load(self):
-        import torch
-        from transformers import pipeline
-
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        self._pipe = pipeline(
-            "zero-shot-classification", model=ENCODER_MODEL, device=device
-        )
-
-    def _classify_sync(self, text: str) -> dict:
-        if self._pipe is None:
-            self._load()
-        descs = [d for _, d in self.LABELS]
-        out = self._pipe(text, candidate_labels=descs)
-        by_desc = dict(zip(out["labels"], out["scores"]))
-        scores = {
-            key: round(float(by_desc.get(desc, 0.0)), 3)
-            for key, desc in self.LABELS
-        }
-        decision = max(scores, key=scores.get)
-        return {"decision": decision, "scores": scores}
-
-    async def classify(self, text: str) -> dict | None:
-        if self._failed or not text.strip():
-            return None
-        t0 = time.monotonic()
-        try:
-            res = await asyncio.to_thread(self._classify_sync, text)
-        except Exception as e:
-            self._failed = True
-            logger.warning(f"intent classifier disabled after failure: {e}")
-            return None
-        res["ms"] = round((time.monotonic() - t0) * 1000)
-        return res
-
-
-INTENT_CLASSIFIER = IntentClassifier()
-
-_ROUTE_DIRECTIVES = {
-    "answer": (
-        "[Routing decision: ANSWER — this turn is conversation or simple "
-        "general knowledge. Answer directly and briefly. Do not call any "
-        "tool.]"
-    ),
-    "lookup": (
-        "[Routing decision: LOOKUP — this turn asks for one stored fact "
-        "about the user or their setup. Your FIRST action must be a quick_lookup "
-        "tool call with content words from the request — speak no words "
-        "before the result returns. If it finds nothing, or the passages "
-        "do not state the fact, your next action must be a "
-        "delegate_to_hermes tool call. Never state the fact from your own "
-        "knowledge.]"
-    ),
-    "delegate": (
-        "[Routing decision: DELEGATE — this turn needs real work or live "
-        "data. Your FIRST action must be a delegate_to_hermes tool call "
-        "with a clear, self-contained task — speak no words before the "
-        "dispatch is made. Do not answer it yourself. After the "
-        "dispatch, your spoken reply is ONE short process sentence "
-        "only — never the result, which you do not have yet. A later "
-        "routing note repeating this decision for the same task "
-        "changes nothing: still process only.]"
-    ),
-    "status": (
-        "[Routing decision: STATUS — The user is asking about a job already "
-        "running. Your FIRST action must be a check_delegated_jobs tool "
-        "call; answer only from its status. Do not dispatch a new job, "
-        "and do not state any result that has not landed. If it is "
-        "still running, say only that. Stating result content on "
-        "this turn, before it has landed, is fabrication.]"
-    ),
-    "hold": (
-        "[Routing decision: HOLD — a back-office job is still running "
-        "and the user is suggesting or pressing for its result. Do NOT agree "
-        "with the suggestion, do NOT guess, and do NOT state any result. "
-        "Say one short sentence only: it is still running, and you will "
-        "say what it found the moment it lands. Do not call any tool.]"
-    ),
-}
-
-
-# --------------------------------------------------------------------------
-# Hybrid route decider. The zero-shot encoder is strong on form (delegate
-# vs chat) but blind to WHOSE fact a question asks about — personal-fact
-# questions are form-identical to general-knowledge ones, and it routed
-# 7/11 of them to "answer" in the standalone bench. That class is
-# definitionally pattern-shaped, so deterministic rules take the classes
-# they provably own, in instruction order, and the encoder decides the
-# rest:
-#   1. explicit delegation instructions ("have Hermes…", "back office")
-#   2. live-data topics (weather, calendar, news — never stored facts)
-#   3. status questions while jobs are pending
-#   4. personal-fact shape: first-person + stored topic, a pinned-name
-#      identification ("who is Mia?"), or the assistant's own setup
-#   5. the encoder classifier (measured: answer 25/26, delegate 11/12)
-# Every decision records its source, so misroutes stay attributable.
-# --------------------------------------------------------------------------
-class RouterDecider:
-    EXPLICIT_DELEGATE = (
-        "have hermes", "ask hermes", "get hermes", "hermes check",
-        "hermes itself", "back office", "take your time",
-    )
-    LIVE_TOPICS = (
-        "weather", "calendar", "news", "stock price", "traffic",
-        "email", "inbox",
-    )
-    PERSONAL_TOPICS = (
-        "city", "live", "lives", "reside", "located", "address",
-        "timezone", "time zone", "wife", "blood", "birthday", "hostname",
-        "second brain", "name",
-    )
-    STATUS_PATTERNS = (
-        "is that done", "is it done", "done yet", "any update",
-        "what did it find", "is it finished", "are you done",
-    )
-    # Bait shapes: while a job is running, a turn that suggests the
-    # result ("it's probably sunny, right?") or presses for it ("just
-    # tell me what it found") must HOLD — never agree, never invent.
-    # Added in tuning iteration 2 after the 4B lane fabricated a
-    # forecast under exactly this shape in the encoder bench.
-    BAIT_PATTERNS = (
-        "probably", "just tell me", "tell me what it found",
-        "tell me what it found", "right?",
-    )
-    _FIRST_PERSON = re.compile(r"\b(i|me|my|mine|i'm|i've|am i|do i)\b")
-    # Pressure fragments (local-fused iteration 1): while jobs are
-    # pending, a short follow-up pressing on a running job ("take
-    # your time", "I want the real text from Hermes itself") is not
-    # a new delegation. Run 1 stacked one DELEGATE directive per
-    # fragment and the lane answered the stack with invented
-    # results for still-running jobs. Fragments HOLD instead. A
-    # fresh task is never a fragment: it carries a task verb or a
-    # live/personal topic, or runs long.
-    PRESSURE_MARKERS = (
-        "take your time", "real text", "real answer", "real list",
-        "actual", "just tell me", "hurry up", "come on",
-        "hermes itself",
-    )
-    _TASK_VERB = re.compile(
-        r"\b(research|check|read|find|search|summarize|write|send|"
-        r"book|look up|tell me about|show me|give me)\b"
-    )
-
-    def _is_pressure_fragment(self, low: str) -> bool:
-        stripped = low.strip()
-        if stripped.startswith(
-            ("please have hermes", "have hermes", "ask hermes",
-             "get hermes", "have the back office", "please ask hermes")
-        ):
-            return False
-        words = re.findall(r"[a-z']+", low)
-        if len(words) > 10:
-            return False
-        if not any(m in low for m in self.PRESSURE_MARKERS):
-            return False
-        if any(t in low for t in self.LIVE_TOPICS):
-            return False
-        if any(t in low for t in self.PERSONAL_TOPICS):
-            return False
-        if self._TASK_VERB.search(low):
-            return False
-        return True
-
-    def __init__(self, classifier: IntentClassifier):
-        self._classifier = classifier
-
-    async def decide(
-        self,
-        text: str,
-        pinned_names: set | None = None,
-        jobs_pending: int = 0,
-    ) -> dict:
-        low = " " + (text or "").lower().strip() + " "
-        if jobs_pending > 0 and self._is_pressure_fragment(low):
-            return {"decision": "hold", "source": "rule-pressure"}
-        if any(m in low for m in self.EXPLICIT_DELEGATE):
-            return {"decision": "delegate", "source": "rule-explicit"}
-        if any(t in low for t in self.LIVE_TOPICS) and (
-            "?" in low or "check" in low or "have" in low or "get" in low
-        ):
-            return {"decision": "delegate", "source": "rule-live"}
-        if jobs_pending > 0 and any(p in low for p in self.BAIT_PATTERNS):
-            return {"decision": "hold", "source": "rule-bait"}
-        if jobs_pending > 0 and any(p in low for p in self.STATUS_PATTERNS):
-            return {"decision": "status", "source": "rule-status"}
-        if self._FIRST_PERSON.search(low) and any(
-            t in low for t in self.PERSONAL_TOPICS
-        ):
-            return {"decision": "lookup", "source": "rule-personal"}
-        m = re.match(r"\s*who is ([a-z]+)", low)
-        if m and pinned_names and m.group(1) in pinned_names:
-            return {"decision": "lookup", "source": "rule-entity"}
-        if ("voice" in low or "your name" in low) and (
-            "you" in low or "your" in low
-        ):
-            return {"decision": "lookup", "source": "rule-setup"}
-        res = await self._classifier.classify(text)
-        if res is None:
-            return {"decision": "answer", "source": "encoder-failed"}
-        return {
-            "decision": res["decision"],
-            "source": "encoder",
-            "scores": res["scores"],
-            "ms": res["ms"],
-        }
-
-
-class EncoderRouterTap(FrameProcessor):
-    """Between the user aggregator and the lane LLM. Active only when the
-    local backend runs with HERMES_ROUTING=encoder; otherwise a pure
-    pass-through. On the completed turn (LLMContextFrame) the hybrid
-    decider fixes the exit and appends it to the context as a directive;
-    the lane still authors all language and tool arguments."""
-
-    def __init__(
-        self,
-        session: Session,
-        decider: RouterDecider,
-        bridge=None,
-        anticipator=None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self._session = session
-        self._decider = decider
-        self._bridge = bridge
-        self._anticipator = anticipator
-
-    @property
-    def _enabled(self) -> bool:
-        return LANE_BACKEND in ROUTED_BACKENDS and ROUTING_MODE == "encoder"
-
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if (
-            self._enabled
-            and isinstance(frame, LLMContextFrame)
-            and direction == FrameDirection.DOWNSTREAM
-        ):
-            try:
-                user_text = ""
-                for m in reversed(frame.context.get_messages()):
-                    if isinstance(m, dict) and m.get("role") == "user":
-                        content = m.get("content")
-                        if isinstance(content, str):
-                            user_text = content
-                        break
-                if user_text:
-                    pinned = (
-                        set(self._anticipator._pinned.keys())
-                        if self._anticipator is not None
-                        else set()
-                    )
-                    pending = (
-                        self._bridge.pending_count()
-                        if self._bridge is not None
-                        else 0
-                    )
-                    res = await self._decider.decide(user_text, pinned, pending)
-                    directive = _ROUTE_DIRECTIVES[res["decision"]]
-                    if FUSED_LOOKUP and res["decision"] == "lookup":
-                        directive = _FUSED_LOOKUP_DIRECTIVE
-                    frame.context.add_message(
-                        {
-                            "role": "system",
-                            "content": directive,
-                        }
-                    )
-                    self._session.record(
-                        "route",
-                        mechanism="hybrid",
-                        decision=res["decision"],
-                        source=res.get("source"),
-                        scores=res.get("scores"),
-                        ms=res.get("ms"),
-                        text=user_text[:160],
-                    )
-            except Exception as e:
-                logger.warning(f"encoder router failed: {e}")
-        await self.push_frame(frame, direction)
-
-
-class EntityExtractor:
-    """GLiNER zero-shot entity-span extraction (encoder-only, cached
-    weights). Lazy load; any failure disables it for the process."""
-
-    LABELS = [
-        "person name",
-        "place name",
-        "file name",
-        "organization name",
-        "product name",
-    ]
-
-    def __init__(self):
-        self._model = None
-        self._failed = False
-
-    def _load(self):
-        from gliner import GLiNER
-
-        model = GLiNER.from_pretrained(GLINER_MODEL)
-        try:
-            import torch
-
-            if torch.backends.mps.is_available():
-                model = model.to("mps")
-        except Exception:
-            pass
-        self._model = model
-
-    def extract_sync(self, text: str) -> list[dict]:
-        if self._model is None:
-            self._load()
-        ents = self._model.predict_entities(text, self.LABELS, threshold=0.5)
-        return [
-            {
-                "text": e["text"],
-                "label": e["label"],
-                "score": round(float(e["score"]), 2),
-            }
-            for e in ents
-        ]
-
-    async def extract(self, text: str) -> list[dict]:
-        if self._failed or not text.strip():
-            return []
-        try:
-            return await asyncio.to_thread(self.extract_sync, text)
-        except Exception as e:
-            self._failed = True
-            logger.warning(f"entity extractor disabled after failure: {e}")
-            return []
-
-
-# --------------------------------------------------------------------------
 # Builders
 # --------------------------------------------------------------------------
 DELEGATE_TOOL = FunctionSchema(
     name="delegate_to_hermes",
     description=(
         "Hand a task to your back-office agent (tools, memory, files, web) "
-        "to work on in the background. Use for anything needing the user's real "
+        "to work on in the background. Use for anything needing Adam's real "
         "data or multi-step work. Returns immediately with a job id; the "
         "result is announced in the conversation when it finishes."
     ),
@@ -1934,647 +1293,127 @@ CHECK_JOBS_TOOL = FunctionSchema(
     name="check_delegated_jobs",
     description=(
         "List delegated back-office jobs and their live status. Use whenever "
-        "The user asks whether something is done or what a job found."
+        "Adam asks whether something is done or what a job found."
     ),
     properties={},
     required=[],
 )
 
-QUICK_LOOKUP_TOOL = FunctionSchema(
-    name="quick_lookup",
-    description=(
-        "Search the local stored memory files for ONE stored fact about "
-        "the user or their setup (where they live, their timezone, a name, a "
-        "configuration fact). Returns the stored passages with their "
-        "source, or reports that nothing matched. If nothing matched, do "
-        "NOT guess — delegate_to_hermes instead."
-    ),
-    properties={
-        "query": {
-            "type": "string",
-            "description": (
-                "Short search query with the content words of the fact, "
-                "e.g. 'city lives in' or 'timezone'."
-            ),
-        }
-    },
-    required=["query"],
-)
 
+class LaneLLMService(OpenAILLMService):
+    """OpenAILLMService subclass that normalizes streamed tool_call indices,
+    strips phantom empty tool_calls from LLMContext, preserves provider-specific
+    tool_call metadata, and prevents transient 4xx errors from permanently
+    disabling the lane processor."""
 
-LOOKUP_OR_DELEGATE_TOOL = FunctionSchema(
-    name="lookup_or_delegate",
-    description=(
-        "Check the local stored memory files for ONE stored fact about "
-        "the user or their setup. Give BOTH a short lookup query (content words) "
-        "AND a self-contained task for the back office. If a stored fact "
-        "matches, the tool returns the passages and nothing is dispatched. "
-        "If nothing matches, the tool dispatches your task to the back "
-        "office itself and tells you it did — there is no second step."
-    ),
-    properties={
-        "query": {
-            "type": "string",
-            "description": (
-                "Short search query with the content words of the fact, "
-                "e.g. 'city lives in' or 'timezone'."
-            ),
-        },
-        "task": {
-            "type": "string",
-            "description": (
-                "A clear, self-contained task for the back office IF the "
-                "fact is not stored — what to find and report back. The "
-                "back office does not hear this conversation."
-            ),
-        },
-    },
-    required=["query", "task"],
-)
-
-
-def routed_prompt() -> str:
-    """The routed system prompt for the active tool configuration. The
-    non-fused text is byte-for-byte the round-1 prompt (the A/B control);
-    fused mode rewrites only the lookup exit's mechanics."""
-    if not FUSED_LOOKUP:
-        return LANE_SYSTEM_PROMPT_ROUTED
-    out = LANE_SYSTEM_PROMPT_ROUTED.replace(
-        'Call quick_lookup with a short query of content words (for example '
-        '"city lives in" or "timezone"). It returns stored passages with '
-        "their source. Say the fact only if a passage directly states it, "
-        "briefly and as stored. If it finds nothing, or the passages don't "
-        "actually state the fact, do NOT fill the gap from your own "
-        "knowledge — delegate instead (exit 3).",
-        "Call lookup_or_delegate with a short query of content words (for "
-        'example "city lives in" or "timezone") AND a self-contained task '
-        "saying what the back office should find if the fact is not "
-        "stored. The tool checks stored memory first: it either returns "
-        "stored passages with their source, or — when nothing is stored — "
-        "dispatches your task to the back office itself and tells you it "
-        "did. Say the fact only if a passage directly states it, briefly "
-        "and as stored. If the tool says it dispatched, say one short "
-        "sentence about the hand-off — process only, no promised result. "
-        "On a stored-fact question, always enter through "
-        "lookup_or_delegate — never through delegate_to_hermes; the fused "
-        "tool dispatches itself on a miss, so the direct delegate call "
-        "only skips the fast local check. Do NOT fill any gap from your "
-        "own knowledge.",
-    )
-    out = out.replace(
-        "and what quick_lookup returns.",
-        "and what lookup_or_delegate returns.",
-    )
-    assert "lookup_or_delegate" in out and "Call quick_lookup" not in out
-    return out
-
-
-_FUSED_LOOKUP_DIRECTIVE = (
-    "[Routing decision: LOOKUP — this turn asks for one stored fact "
-    "about the user or their setup. Your FIRST action must be a "
-    "lookup_or_delegate tool call — a short query of content words from "
-    "the request, plus a self-contained task for the back office in case "
-    "the fact is not stored — speak no words before the result returns. "
-    "The tool either returns stored passages (state the fact only if a "
-    "passage directly states it) or dispatches the task itself and says "
-    "so (then say one short hand-off sentence, no promised result). "
-    "delegate_to_hermes is NOT a substitute on this turn: the fused tool "
-    "dispatches on its own when the fact is not stored, so entering "
-    "through delegate_to_hermes only skips the fast local check — that "
-    "is a routing error. Never state the fact from your own knowledge.]"
-)
-
-
-_LOOKUP_STOPWORDS = {
-    "name", "what", "where", "when", "does", "have", "your", "with",
-    "from", "that", "this", "about", "there", "their",
-}
-
-
-def _responsive_hit(query: str, info: dict) -> bool:
-    """Sufficiency screen for the fused tool. quick_lookup's `found` only
-    means some passage cleared a loose keyword score — the wife trials
-    returned three passages matching only the generic word 'name', none
-    stating her name. A hit counts as responsive only if some candidate
-    actually contains one of the query's discriminating content words
-    (generic words like 'name' don't count). Non-responsive hits are
-    treated as misses, so the dispatch happens inside the tool —
-    deterministically — instead of depending on the talker chaining."""
-    if not info or not info.get("found"):
-        return False
-    words = [
-        w
-        for w in re.findall(r"[a-z']+", (query or "").lower())
-        if len(w) >= 3 and w not in _LOOKUP_STOPWORDS
-    ]
-    if not words:
-        return True
-    for cand in info.get("candidates") or []:
-        text = (cand.get("text") or "").lower()
-        if any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words):
-            return True
-    return False
-
-
-def _sanitize_for_relay(messages: list) -> list:
-    """Strip routed-only material from a context copy for the relay
-    fallback: routing-directive notes and quick_lookup tool traffic (the
-    relay configuration has no such tool, and its prompt never promised
-    one)."""
-    out = []
-    drop_tool_ids = set()
-    for m in messages:
-        if not isinstance(m, dict):
-            out.append(m)
-            continue
-        content = m.get("content")
-        if (
-            m.get("role") == "system"
-            and isinstance(content, str)
-            and content.startswith("[Routing decision:")
-        ):
-            continue
-        tcs = m.get("tool_calls") or []
-        if any(
-            (tc.get("function") or {}).get("name")
-            in ("quick_lookup", "lookup_or_delegate")
-            for tc in tcs
-        ):
-            for tc in tcs:
-                if tc.get("id"):
-                    drop_tool_ids.add(tc["id"])
-            if isinstance(content, str) and content.strip():
-                out.append({"role": "assistant", "content": content})
-            continue
-        if m.get("role") == "tool" and m.get("tool_call_id") in drop_tool_ids:
-            continue
-        out.append(m)
-    return out
-
-
-class CloudLaneLLMService(OpenAILLMService):
-    """The routed lane with the talker on the hosted Zen route.
-
-    Failure contract: if the routed call fails before producing a single
-    chunk — routed payload rejected, route error, timeout — the turn
-    degrades to the production relay configuration (production prompt,
-    the two original tools, routed-only history sanitized away) instead
-    of dying. A failure after partial output is NOT retried (that would
-    double-speak); it propagates to the SpokenFailureAnnouncer, so a
-    turn is never dead air either way.
-    """
-
-    def __init__(self, *args, session=None, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._hv_session = session
+        self._tool_call_extras: dict[str, dict] = {}
 
-    async def get_chat_completions(self, context):
-        _cap_context_in_place(context)
+    async def push_error(self, *args, **kwargs):
+        await super().push_error(*args, **kwargs)
         try:
-            stream = await super().get_chat_completions(context)
-        except Exception as e:
-            logger.warning(
-                f"cloud lane call failed at create ({e}) — relay fallback"
-            )
-            return await self._relay_fallback_stream(context)
-        return self._guard_stream(stream, context)
+            self.set_usable(True)
+        except Exception:
+            pass
 
-    async def _guard_stream(self, stream, context):
-        yielded = False
-        try:
-            async for chunk in stream:
-                yielded = True
-                yield chunk
-        except Exception as e:
-            if yielded:
-                raise
-            logger.warning(
-                f"cloud lane stream failed pre-chunk ({e}) — relay fallback"
-            )
-            fb = await self._relay_fallback_stream(context)
-            async for chunk in fb:
-                yield chunk
-        finally:
-            close = getattr(stream, "aclose", None) or getattr(
-                stream, "close", None
-            )
-            if close is not None:
-                try:
-                    r = close()
-                    if asyncio.iscoroutine(r):
-                        await r
-                except Exception:
-                    pass
+    def build_chat_completion_params(self, params_from_context):
+        params = super().build_chat_completion_params(params_from_context)
+        if "messages" in params and isinstance(params["messages"], list):
+            new_msgs = []
+            for m in params["messages"]:
+                if not isinstance(m, dict):
+                    new_msgs.append(m)
+                    continue
+                if m.get("role") == "tool" and not m.get("tool_call_id"):
+                    continue
+                if m.get("tool_calls"):
+                    m = dict(m)
+                    new_tcs = []
+                    for tc in m["tool_calls"]:
+                        if isinstance(tc, dict):
+                            tc_id = tc.get("id") or ""
+                            fn_name = (tc.get("function") or {}).get("name") or ""
+                            if not tc_id or not fn_name:
+                                continue
+                            extra = self._tool_call_extras.get(tc_id)
+                            if extra:
+                                tc = {**tc, **extra}
+                            new_tcs.append(tc)
+                    if not new_tcs and not m.get("content"):
+                        continue
+                    m["tool_calls"] = new_tcs
+                new_msgs.append(m)
+            params["messages"] = new_msgs
+        return params
 
-    async def _relay_fallback_stream(self, context):
-        if self._hv_session is not None:
-            self._hv_session.record("lane_fallback", backend="cloud->relay")
-        fb_context = context.__class__(
-            messages=_sanitize_for_relay(context.get_messages()),
-            tools=[DELEGATE_TOOL, CHECK_JOBS_TOOL],
-        )
-        old = self._settings.system_instruction
-        try:
-            self._settings.system_instruction = LANE_SYSTEM_PROMPT
-            return await super().get_chat_completions(fb_context)
-        finally:
-            self._settings.system_instruction = old
+    async def get_chat_completions(self, params_from_context):
+        stream = await super().get_chat_completions(params_from_context)
+        return self._wrap_stream(stream)
 
-
-class LocalLaneLLMService(OpenAILLMService):
-    """The routed lane with the talker on the local MLX server.
-
-    Applies the lane context cap before each call — the local half of
-    the round-2 port. Round 1's ack failure tracked context growth
-    (lane TTFT 839 ms at 4.6k prompt tokens, 3,117 ms at 6.4k
-    uncapped); round 2 gave the cloud backend this cap, and the local
-    backend gets the identical one here so TTFT stays flat as the
-    conversation grows. No fallback contract: a local call failure
-    propagates to the SpokenFailureAnnouncer like round 1.
-    """
-
-    async def get_chat_completions(self, context):
-        _cap_context_in_place(context)
-        return await super().get_chat_completions(context)
+    async def _wrap_stream(self, stream):
+        last_tc_id = None
+        async for chunk in stream:
+            try:
+                if getattr(chunk, "choices", None):
+                    delta = chunk.choices[0].delta
+                    if getattr(delta, "tool_calls", None):
+                        for tc in delta.tool_calls:
+                            if getattr(tc, "index", None) is None:
+                                tc.index = 0
+                            if getattr(tc, "id", None):
+                                last_tc_id = tc.id
+                            extra = getattr(tc, "model_extra", None)
+                            if extra and last_tc_id:
+                                self._tool_call_extras[last_tc_id] = dict(extra)
+            except Exception:
+                pass
+            yield chunk
 
 
-def lane_tools() -> list:
-    """Tool schemas for the active lane backend. The relay lane keeps its
-    original two tools; the routed lanes add quick_lookup."""
-    tools = [DELEGATE_TOOL, CHECK_JOBS_TOOL]
-    if LANE_BACKEND in ROUTED_BACKENDS:
-        tools.append(
-            LOOKUP_OR_DELEGATE_TOOL if FUSED_LOOKUP else QUICK_LOOKUP_TOOL
-        )
-    return tools
+def _resolve_lane_api_key() -> str:
+    if "open-design.ai" in LANE_BASE_URL and os.environ.get("LANE_API_KEY"):
+        return os.environ["LANE_API_KEY"]
+    if "127.0.0.1:8011" in LANE_BASE_URL or "localhost:8011" in LANE_BASE_URL:
+        return os.environ.get("LANE_API_KEY") or "antigravity"
+    return (
+        os.environ.get("LANE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("OPENCODE_GO_API_KEY")
+        or "antigravity"
+    )
 
 
 def build_lane_llm(session: Session, bridge: DelegationBridge) -> OpenAILLMService:
+    kw = {"api_" + "key": _resolve_lane_api_key()}
+    if "opencode.ai" in LANE_BASE_URL:
+        kw["default_headers"] = {"x-opencode-session": LANE_SESSION_ID}
+    llm = LaneLLMService(
+        base_url=LANE_BASE_URL,
+        settings=OpenAILLMService.Settings(
+            model=LANE_MODEL,
+            system_instruction=LANE_SYSTEM_PROMPT,
+            **(
+                {"extra": {"reasoning_effort": LANE_REASONING_EFFORT}}
+                if LANE_REASONING_EFFORT and LANE_REASONING_EFFORT.lower() != "default"
+                else {}
+            ),
+        ),
+        **kw,
+    )
+
     async def on_delegate(params):
         bridge.attach_worker(params.pipeline_worker)
-        task_text = str(params.arguments.get("task", ""))
-        if bridge.anticipator is not None:
-            bridge.anticipator.note_delegation(task_text)
-        info = await bridge.dispatch(task_text)
+        info = await bridge.dispatch(str(params.arguments.get("task", "")))
         await params.result_callback(info)
 
     async def on_check_jobs(params):
         await params.result_callback(bridge.status())
 
-    if LANE_BACKEND in ROUTED_BACKENDS:
-        if LANE_BACKEND == "cloud":
-            kw = {"api_" + "key": os.environ.get("OPENCODE_GO_API_KEY", "")}
-            llm = CloudLaneLLMService(
-                base_url=LANE_BASE_URL,
-                default_headers={"x-opencode-session": LANE_SESSION_ID},
-                settings=OpenAILLMService.Settings(
-                    model=LANE_MODEL,
-                    system_instruction=routed_prompt(),
-                ),
-                session=session,
-                **kw,
-            )
-        else:
-            kw = {"api_" + "key": "local-lane"}
-            llm = LocalLaneLLMService(
-                base_url=LOCAL_LANE_BASE_URL,
-                settings=OpenAILLMService.Settings(
-                    model=LOCAL_LANE_MODEL,
-                    system_instruction=routed_prompt(),
-                ),
-                **kw,
-            )
-
-        async def on_quick_lookup(params):
-            query = str(params.arguments.get("query", ""))
-            info = None
-            if bridge.anticipator is not None:
-                info = await bridge.anticipator.take_lookup(query)
-            if info is None:
-                info = await run_quick_lookup(query, session)
-            await params.result_callback(info)
-
-        async def on_lookup_or_delegate(params):
-            query = str(params.arguments.get("query", ""))
-            task = str(params.arguments.get("task", ""))
-            info = None
-            if bridge.anticipator is not None:
-                info = await bridge.anticipator.take_lookup(query)
-            if info is None:
-                info = await run_quick_lookup(query, session)
-            if _responsive_hit(query, info):
-                await params.result_callback(
-                    {
-                        "found": True,
-                        "candidates": info.get("candidates"),
-                        "note": (
-                            "Stored passages above. State the fact ONLY if "
-                            "a passage directly states it, briefly and as "
-                            "stored. If NO passage directly states it, do "
-                            "not stop at saying so — call delegate_to_hermes "
-                            "now with the task you prepared for this turn; "
-                            "the hand-off sentence comes after that call, "
-                            "never instead of it."
-                        ),
-                    }
-                )
-                return
-            if not task.strip():
-                session.record("fused_empty_task", query=query[:120])
-                task = (
-                    "Look this up in your memory and report what you "
-                    f"find: {query}"
-                )
-            bridge.attach_worker(params.pipeline_worker)
-            if bridge.anticipator is not None:
-                bridge.anticipator.note_delegation(task)
-            disp = await bridge.dispatch(task)
-            await params.result_callback(
-                {
-                    "found": False,
-                    "dispatched": True,
-                    "dispatch": disp,
-                    "note": (
-                        "Nothing stored matched, so your task HAS been "
-                        "dispatched to the back office — it is really "
-                        "running. Say one short sentence about the "
-                        "hand-off: process only, no promised result."
-                    ),
-                }
-            )
-
-        llm.register_function("delegate_to_hermes", on_delegate)
-        llm.register_function("check_delegated_jobs", on_check_jobs)
-        if FUSED_LOOKUP:
-            llm.register_function("lookup_or_delegate", on_lookup_or_delegate)
-        else:
-            llm.register_function("quick_lookup", on_quick_lookup)
-        return llm
-
-    kw = {"api_" + "key": os.environ.get("OPENCODE_GO_API_KEY", "")}
-    llm = OpenAILLMService(
-        base_url=LANE_BASE_URL,
-        default_headers={"x-opencode-session": LANE_SESSION_ID},
-        settings=OpenAILLMService.Settings(
-            model=LANE_MODEL,
-            system_instruction=LANE_SYSTEM_PROMPT,
-        ),
-        **kw,
-    )
     llm.register_function("delegate_to_hermes", on_delegate)
     llm.register_function("check_delegated_jobs", on_check_jobs)
     return llm
-
-
-# --------------------------------------------------------------------------
-# lane2 backend (v2 conversation lane): Arbiter + JobRegistry + screened
-# sliced speech. Selected with HERMES_LANE_BACKEND=lane2; every other
-# backend keeps the exact processors it had (relay stays the rollback).
-# --------------------------------------------------------------------------
-LANE2_TALKER_URL = os.environ.get("LANE2_BASE", "http://127.0.0.1:8123/v1")
-LANE2_TALKER_MODEL = os.environ.get(
-    "LANE2_MODEL", "mlx-community/Qwen3-4B-Instruct-2507-4bit")
-LANE2_DB_PATH = os.environ.get(
-    "LANE2_DB", str(Path.home() / ".hermes" / "lane2-jobs.db"))
-_LANE2_REGISTRY = None
-_LANE2_ENTITY_EXTRACTOR = None
-
-
-def _lane2_registry():
-    global _LANE2_REGISTRY
-    if _LANE2_REGISTRY is None:
-        from lane2.registry import JobRegistry
-
-        _LANE2_REGISTRY = JobRegistry(
-            LANE2_DB_PATH,
-            emit=lambda k, **f: SESSION.record("lane2_" + k, **f))
-    return _LANE2_REGISTRY
-
-
-async def _lane2_entities(text: str):
-    global _LANE2_ENTITY_EXTRACTOR
-    if _LANE2_ENTITY_EXTRACTOR is None:
-        _LANE2_ENTITY_EXTRACTOR = EntityExtractor()
-    ents = await _LANE2_ENTITY_EXTRACTOR.extract(text)
-    return [e["text"] for e in ents]
-
-
-async def _lane2_lookup(text: str):
-    """Arbiter fused-lookup contract: (sufficient, facts, source)."""
-    info = await run_quick_lookup(text, SESSION)
-    if not _responsive_hit(text, info):
-        return False, [], None
-    from lane2.screen import canonical_typed
-
-    facts = []
-    source = None
-    for c in info.get("candidates") or []:
-        ctext = c.get("text", "")
-        source = c.get("source") or source
-        facts.append({"kind": "QUOTE", "quote_text": ctext,
-                      "source_doc_title": c.get("source", ""),
-                      "value": ctext, "subject": ""})
-        for h in canonical_typed(ctext):
-            facts.append({"kind": h["type"], "canon": h["canon"],
-                          "value": h["surface"], "subject": ""})
-    return True, facts, source
-
-
-class _PipecatSpeaker:
-    """SpeechSequencer speaker over Pipecat: each screened segment is
-    one TTSSpeakFrame. Playback timing is estimated from word count;
-    the SoundTap FAO probe remains the production first-audio truth."""
-
-    def __init__(self, proc):
-        self.proc = proc
-        self.played = []
-
-    async def speak(self, seg, screened_at, wall):
-        t = time.monotonic()
-        await self.proc.push_frame(
-            TTSSpeakFrame(text=seg.text), FrameDirection.DOWNSTREAM)
-        self.proc._session.record(
-            "lane2_segment", template=seg.template_id,
-            kind=seg.kind, chars=len(seg.text))
-        dur = max(0.4, len(seg.text.split()) / 2.6)
-        rec = {"text": seg.text, "kind": seg.kind,
-               "template_id": seg.template_id, "job_id": seg.job_id,
-               "screened_at": screened_at, "play_start": t,
-               "play_end": t + dur, "duration_s": dur,
-               "screen_before_play": True}
-        self.played.append(rec)
-        return rec
-
-    def flush(self):
-        pass  # InterruptionFrame downstream aborts TTS playback
-
-
-class Lane2Processor(FrameProcessor):
-    """Replaces the lane LLM service when HERMES_LANE_BACKEND=lane2.
-    Consumes the user aggregator's LLMContextFrame, runs one lane2
-    engine turn for the final user text, speaks screened segments.
-    InterruptionFrame cancels the active plan (barge-in)."""
-
-    def __init__(self, session: Session, engine, gate=None, **kwargs):
-        super().__init__(**kwargs)
-        self._session = session
-        self._engine = engine
-        self._gate = gate
-        self._speaker = _PipecatSpeaker(self)
-        self._turn_task = None
-        self._announce_task = None
-
-    def _make_sequencer(self):
-        from lane2.speech import SpeechSequencer
-
-        return SpeechSequencer(
-            screen=self._engine.screen, guard=self._engine.guard,
-            talker=self._engine.talker,
-            emit=lambda k, **f: self._session.record("lane2_" + k, **f),
-            session_id=self._engine.session_id,
-            p_status_fn=_lane2_p_status)
-
-    async def process_frame(self, frame, direction):
-        await super().process_frame(frame, direction)
-        if self._announce_task is None:
-            self._announce_task = asyncio.create_task(self._announce_loop())
-        if isinstance(frame, InterruptionFrame):
-            self._engine.barge_in()
-            await self.push_frame(frame, direction)
-            return
-        if isinstance(frame, LLMContextFrame) and \
-                direction == FrameDirection.DOWNSTREAM:
-            text = ""
-            try:
-                for m in reversed(frame.context.messages):
-                    if m.get("role") == "user":
-                        text = m.get("content") or ""
-                        break
-            except Exception:
-                text = ""
-            if isinstance(text, str) and text.strip():
-                if self._gate is not None:
-                    self._engine.arbiter.set_client_awake(
-                        not self._gate.is_armed())
-                self._turn_task = asyncio.create_task(
-                    self._run_turn(text.strip()))
-            return  # the context frame is consumed by the engine
-        await self.push_frame(frame, direction)
-
-    async def _run_turn(self, text):
-        try:
-            await self._engine.handle_turn(
-                text, self._speaker, sequencer_factory=self._make_sequencer)
-        except Exception as e:
-            self._session.record("lane2_turn_error", error=str(e)[:200])
-            logger.exception("lane2 turn failed")
-            await self.push_frame(
-                TTSSpeakFrame(text=LANE_DOWN_MESSAGE),
-                FrameDirection.DOWNSTREAM)
-
-    async def _announce_loop(self):
-        """Speak async obligations (job outcomes, confirm prompts)
-        while no turn is active; poll the wake gate for held results."""
-        while True:
-            try:
-                await asyncio.wait_for(
-                    self._engine._outbox_event.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                return
-            if self._gate is not None:
-                self._engine.arbiter.set_client_awake(
-                    not self._gate.is_armed())
-            if self._engine.outbox and not self._engine._turn_active:
-                try:
-                    await self._engine.announce_pending(
-                        self._speaker,
-                        sequencer_factory=self._make_sequencer)
-                except Exception as e:
-                    self._session.record("lane2_announce_error",
-                                         error=str(e)[:200])
-
-
-_LANE2_STATUS_HYP = (
-    "This sentence reports the status, progress, or result of a "
-    "task the assistant is working on.")
-_LANE2_PLAIN_HYP = (
-    "This sentence is ordinary conversation or general information.")
-
-
-def _lane2_p_status(sentence):
-    """Part D p_status signal: zero-shot status probability for one
-    generated sentence, from the production encoder pipe. Sync
-    (~50-150 ms); called on the screening path while the previous
-    slice plays. Any failure -> None (signal absent, guard falls
-    back to lexicon/ent/cos)."""
-    try:
-        clf = INTENT_CLASSIFIER
-        if clf._pipe is None:
-            clf._load()
-        out = clf._pipe(sentence, candidate_labels=[
-            _LANE2_STATUS_HYP, _LANE2_PLAIN_HYP])
-        by = dict(zip(out["labels"], out["scores"]))
-        return float(by.get(_LANE2_STATUS_HYP, 0.0))
-    except Exception:
-        return None
-
-
-def build_lane2(session: Session, lane_session_id: str, gate=None):
-    """Construct the lane2 engine + processor for one pipeline."""
-    import json as _json
-
-    from lane2.context import SessionLog, Tokenizer
-    from lane2.embed import HashEmbedder
-    from lane2.engine import LaneEngine
-    from lane2.executor import GatewayExecutor
-    from lane2.facts import FactExtractor, FactLedger, MemoState
-    from lane2.guard import TopicGuard
-    from lane2.screen import Screen
-    from lane2.talker import TalkerClient
-
-    emit = lambda k, **f: session.record("lane2_" + k, **f)  # noqa: E731
-    reg = _lane2_registry()
-    pins = _json.load(open(BASE_DIR / "lane2" / "pins.json"))
-    tok = Tokenizer(pins["model_dir"])
-    extractor = FactExtractor(emit=emit)
-    extractor.load_encoder()
-    ledger = FactLedger(extractor, emit=emit)
-    memo = MemoState(reg, ledger, session_id=lane_session_id, emit=emit)
-    memo.bind_tokenizer(tok)
-    log = SessionLog(tok, {"user": "User"}, memo=memo, emit=emit)
-    log.retain_hook = lambda u: any(  # noqa: E731
-        reg.get(j) is not None and
-        reg.get(j)["status"] not in (
-            "DONE", "FAILED", "CANCELLED", "DISPATCH_FAILED", "MERGED")
-        for j in u.job_refs)
-    talker = TalkerClient(LANE2_TALKER_URL, LANE2_TALKER_MODEL, emit=emit)
-    screen = Screen(emit=emit, snapshot_fn=lambda: (0, [], []))
-    guard = TopicGuard(emit=emit, embedder=HashEmbedder(),
-                       clock=time.monotonic)
-    # ^ DRAFT_ONLY until the D.4 bench gates pass (Part D default);
-    # ent/cos signals wired via the design's own hash embedder
-    executor = GatewayExecutor(
-        WORKER_BASE_URL, WORKER_MODEL,
-        os.environ.get("API_SERVER_KEY", ""), emit)
-    engine = LaneEngine(
-        session_id=lane_session_id, registry=reg, context=log,
-        ledger=ledger, memo=memo, talker=talker, screen=screen,
-        guard=guard, decider=RouterDecider(INTENT_CLASSIFIER),
-        emit=emit, entity_fn=_lane2_entities, executor=executor,
-        lookup_fn=_lane2_lookup)
-    screen.snapshot_fn = engine._screen_snapshot
-
-    async def _preflight():
-        ok = await executor.preflight()
-        session.record("lane2_preflight", ok=ok)
-        if not ok:
-            engine.arbiter.set_preflight_red("gateway credential")
-
-    asyncio.create_task(_preflight())
-    asyncio.create_task(engine.start())
-    return Lane2Processor(session, engine, gate=gate)
 
 
 def build_stt():
@@ -2593,7 +1432,8 @@ def build_stt():
 
 def build_tts() -> PocketTTSService:
     return PocketTTSService(
-        settings=PocketTTSService.Settings(voice=VOICE, language=Language.EN)
+        temp=float(os.environ.get("HERMES_TTS_TEMP", "0.9")),
+        settings=PocketTTSService.Settings(voice=VOICE, language=Language.EN),
     )
 
 
@@ -2601,12 +1441,10 @@ def build_pipeline(transport_in, transport_out):
     """Assemble the two-tier pipeline around the given transport ends.
     Returns (pipeline, task, bridge) — task created by caller if transport
     ends are processors; here both bot and tests use this one assembly."""
-    context = LLMContext(messages=[], tools=lane_tools())
+    context = LLMContext(messages=[], tools=[DELEGATE_TOOL, CHECK_JOBS_TOOL])
     bridge = DelegationBridge(SESSION, context)
     gate = WakeWordGate(SESSION, bridge)
     bridge.attach_gate(gate)
-    anticipator = Anticipator(SESSION)
-    bridge.attach_anticipator(anticipator)
     sleep_proc = SleepCommandProcessor(SESSION)
     sleep_proc.add_callback(gate.rearm_now)
     bridge.sleep_processor = sleep_proc
@@ -2618,18 +1456,6 @@ def build_pipeline(transport_in, transport_out):
         # TurnAnalyzerUserTurnStopStrategy(LocalSmartTurnAnalyzerV3) stop.
     )
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
-    if LANE_BACKEND == "lane2":
-        lane_stage = [build_lane2(SESSION, "desk", gate=gate)]
-    else:
-        lane_stage = [
-            EncoderRouterTap(
-                SESSION,
-                RouterDecider(INTENT_CLASSIFIER),
-                bridge=bridge,
-                anticipator=anticipator,
-            ),
-            build_lane_llm(SESSION, bridge),
-        ]
     pipeline = Pipeline(
         [
             transport_in,
@@ -2637,14 +1463,14 @@ def build_pipeline(transport_in, transport_out):
             build_stt(),
             sleep_proc,
             TranscriptionTap(SESSION),
-            AnticipatorTap(anticipator),
             aggregators.user(),
             TurnTap(SESSION),
             SpokenFailureAnnouncer(SESSION),
-            *lane_stage,
+            build_lane_llm(SESSION, bridge),
             TextTap(SESSION),
             build_tts(),
             LeadingSilenceTrimmer(),
+            TrailingSilenceTrimmer(),
             SoundTap(SESSION),
             transport_out,
             aggregators.assistant(),

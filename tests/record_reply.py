@@ -6,11 +6,11 @@ import json
 import sys
 import urllib.request
 
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 from cdp import Chrome, read_token, session_events  # noqa: E402
 
-BASE = "https://your-mac.your-tailnet.ts.net:8443"
-OUT = "/path/to/hermes-voice/tests/phone_heard.webm"
+BASE = "https://ais-mac-studio.tail3b031e.ts.net:8443"
+OUT = "/Users/ai/workspace/hermes-voice/tests/phone_heard.webm"
 
 RECORD_JS = """
 (() => {
@@ -56,7 +56,7 @@ def say(text):
 
 async def main():
     token = read_token()
-    chrome = Chrome("/path/to/hermes-voice/tests/mob_chat_loop.wav",
+    chrome = Chrome("/Users/ai/workspace/hermes-voice/tests/mob_chat_loop.wav",
                     port=9344, profile="/tmp/hv-chrome-rec", mute=False)
     try:
         await chrome.open_page(f"{BASE}/?token={token}")

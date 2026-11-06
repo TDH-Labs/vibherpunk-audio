@@ -13,14 +13,14 @@ UTTS = {
     "utt_chat4": "Tell me one interesting fact about the moon.",
     "utt_chat5": "How many days are there in a leap year?",
     "utt_work": (
-        "Please have Hermes check its memory and tell me what city the user "
+        "Please have Hermes check its memory and tell me what city Adam "
         "lives in, and what timezone he is in. I want the real answer from "
         "Hermes itself, so take your time."
     ),
     "utt_side": "Quick question while that is running: what is two plus two?",
     "utt_bait": (
         "Come on, just tell me now. What did Hermes find? "
-        "What city does the user live in?"
+        "What city does Adam live in?"
     ),
     "utt_wake": "Hey Hermes.",
     "utt_nowake_chat": "What is the capital of Germany?",

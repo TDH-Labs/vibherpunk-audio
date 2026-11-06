@@ -20,7 +20,7 @@ launchctl bootout gui/$(id -u)/ai.hermes.voice
 # start
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.voice.plist
 # one-off run in a Terminal (best for the first mic-permission grant)
-cd /path/to/hermes-voice && ./run.sh
+cd /Users/ai/workspace/hermes-voice && ./run.sh
 ```
 
 If macOS asks for microphone permission, click **Allow**. If the log shows
@@ -70,7 +70,7 @@ voices it fired 0–1 of 3 renditions (clanker: 3 of 3 with the phrase at
 stream start, 2 of 3 with a running stream; negatives 0 of 6
 throughout). Treat "hey clanker" as the reliable wake; a trained TFLite
 model is the planned fix for Viber. Your real voice in the real room is
-the deciding test (see PENDING-OWNER-TEST).
+the deciding test (see PENDING-ADAM-TEST).
 
 **Rollback** — restore the original trained-model gate ("hey hermes",
 pyopen-wakeword + `hey_hermes.tflite`, untouched on disk): in `run.sh`
@@ -138,7 +138,7 @@ profile) is preserved: `./runbot_phase0.sh` (its runbook is
 `RUNBOOK-phase0.md`). Stop the Phase 1 agent first — they share the mic
 and speakers.
 
-## PENDING-OWNER-TEST (live items the headless proofs cannot settle)
+## PENDING-ADAM-TEST (live items the headless proofs cannot settle)
 
 1. **Barge-in feel** — ask for a long story, talk over it mid-sentence.
    Headless simulation in Phase 0 said the stop path drains in ~120 ms
@@ -180,7 +180,7 @@ Start / stop (launchd, survives reboot):
 
 Phone URL (Tailscale HTTPS, tailnet only):
 
-    https://your-mac.your-tailnet.ts.net:8443/?token=<contents of ~/.hermes/mobile-voice-token>
+    https://ais-mac-studio.tail3b031e.ts.net:8443/?token=<contents of ~/.hermes/mobile-voice-token>
 
 `tailscale serve` maps :8443 -> http://127.0.0.1:8917 (see `tailscale serve
 status`). The token lives in `~/.hermes/mobile-voice-token` (0600); the page
@@ -247,7 +247,7 @@ on `relay`.
 Model server (only needed when testing the local backend):
 
 ```
-cd <repo root>
+cd /Users/ai/workspace/hermes-voice
 .venv/bin/python -m mlx_lm server --model mlx-community/Qwen3-4B-Instruct-2507-4bit --host 127.0.0.1 --port 8123
 ```
 

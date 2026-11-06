@@ -8,7 +8,7 @@ import scipy.io.wavfile
 from pyopen_wakeword import OpenWakeWord, OpenWakeWordFeatures
 from scipy.signal import resample_poly
 
-MODEL = "/path/to/.hermes/hermes-agent/tools/wakewords/hey_hermes.tflite"
+MODEL = "/Users/ai/.hermes/hermes-agent/tools/wakewords/hey_hermes.tflite"
 THRESHOLD = 0.6
 CONFIRM = 3
 

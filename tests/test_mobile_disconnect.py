@@ -13,12 +13,12 @@ import json
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 from cdp import Chrome, read_token, session_events, wait_event  # noqa: E402
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "https://your-mac.your-tailnet.ts.net:8443"
-WORK_WAV = "/path/to/hermes-voice/tests/mob_work_once.wav"
-CHAT_WAV = "/path/to/hermes-voice/tests/mob_chat_once.wav"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "https://ais-mac-studio.tail3b031e.ts.net:8443"
+WORK_WAV = "/Users/ai/workspace/hermes-voice/tests/mob_work_once.wav"
+CHAT_WAV = "/Users/ai/workspace/hermes-voice/tests/mob_chat_once.wav"
 
 
 async def connect_and_dispatch(token):

@@ -240,16 +240,23 @@ def _canon_time(surf):
 
 
 # ------------------------------------------------------------ segments
+# The minting key lives at module level in THIS module only (lane3 H2:
+# in v2 it was a public class attribute and the speech module minted
+# segments with it — the "type is the enforcement" claim was false).
+# Nothing outside screen.py can construct a ScreenedSegment without
+# importing a private name, and both speakers isinstance-check.
+_SEGMENT_KEY = object()
+
+
 class ScreenedSegment:
     """Only the screen constructs these (build-time checked path to
     TTS, §2.7.1 item 1)."""
-    _KEY = object()
     __slots__ = ("text", "kind", "template_id", "job_id", "screened_ms",
                  "snapshot_version", "hits")
 
     def __init__(self, key, text, kind, template_id=None, job_id=None,
                  screened_ms=0.0, snapshot_version=0, hits=()):
-        if key is not ScreenedSegment._KEY:
+        if key is not _SEGMENT_KEY:
             raise TypeError("ScreenedSegment is screen-constructed only")
         self.text = text
         self.kind = kind  # generated | template
@@ -266,8 +273,8 @@ class ScreenFault(Exception):
 
 # ------------------------------------------------------------ the screen
 class Screen:
-    def __init__(self, *, emit, snapshot_fn, tz_name="UTC",
-                 assistant_name="Vibherpunk", user_name="the user",
+    def __init__(self, *, emit, snapshot_fn, tz_name="America/Los_Angeles",
+                 assistant_name="Vibherpunk", user_name="Adam",
                  global_canaries=()):
         self.emit = emit
         self.snapshot_fn = snapshot_fn  # () -> (version, [task rows], facts)
@@ -735,12 +742,98 @@ class Screen:
             return ("C4", ("REPLACE", (("T-UNVERIFIED", {}), None)))
         return (None, ("PASS", sentence))
 
+    def pass_segment(self, text):
+        """Mint a segment for a sentence the screen has just PASSed.
+        The only path by which generated text becomes speakable
+        (lane3 H2: the sequencer used to mint these itself)."""
+        return ScreenedSegment(
+            _SEGMENT_KEY, text, "generated",
+            snapshot_version=self.S0_version)
+
+    # Templates whose slots carry free text from outside the lane
+    # (worker summaries, document quotes). Their typed values are
+    # validated structurally at construction (lane3 H1): every typed
+    # value in the slot must be backed by the current allowlist —
+    # registry result facts, lookup facts, user utterances, header —
+    # or the slot is withheld and a value-free template is spoken
+    # instead. (T-GUARD-DONE's summary slot is inert: its variants
+    # render {result_headline}, not {summary}.)
+    _FREE_TEXT_TEMPLATES = {"T-RESULT", "T-RESULT-NULL",
+                            "T-HELD-BATCH", "T-QUOTE"}
+    _WITHHELD_FALLBACK = {"T-QUOTE": "T-UNVERIFIED"}
+
+    def _allowed_from_facts(self, facts):
+        allowed = set()
+        for f in facts:
+            if f.get("canon") is not None:
+                allowed.add((f.get("kind"), f["canon"]))
+            elif f.get("value") is not None:
+                for h in canonical_typed(str(f["value"])):
+                    allowed.add((h["type"], h["canon"]))
+            qt = f.get("quote_text")
+            if qt:
+                for h in canonical_typed(qt):
+                    allowed.add((h["type"], h["canon"]))
+        return allowed
+
+    def _summary_backed(self, summary, job_id):
+        """(ok, offenders): every typed value in summary is backed by
+        THIS job's registry facts, the turn's lookup facts, the user's
+        own utterances, or the header (date/time). Another job's facts
+        do not back this job's summary. On a miss, refresh the
+        snapshot once — a job that completed mid-turn has its result
+        facts in the registry by the time its announcement is built,
+        and those facts are legitimate backing."""
+        hits = canonical_typed(summary or "")
+        if not hits:
+            return True, []
+
+        def allowed_for(facts):
+            allowed = {(t, c) for (t, c), provs in self.allow.items()
+                       if provs & {"HEADER", "USER"}}
+            if job_id is None:
+                # T-HELD-BATCH aggregates several jobs' summaries by
+                # construction; backing is the session's facts.
+                own = list(facts)
+            else:
+                own = [f for f in facts
+                       if f.get("task_id") in (job_id, None)]
+            return allowed | self._allowed_from_facts(own)
+
+        offenders = [(h["type"], h["canon"]) for h in hits
+                     if (h["type"], h["canon"])
+                     not in allowed_for(self.facts)]
+        if offenders:
+            try:
+                _v, _t, fresh_facts = self.snapshot_fn()
+            except Exception:
+                fresh_facts = []
+            allowed = allowed_for(fresh_facts)
+            offenders = [(h["type"], h["canon"]) for h in hits
+                         if (h["type"], h["canon"]) not in allowed]
+        return (not offenders), offenders
+
     def template_segment(self, template_id, slots, job_id=None):
         """Templates are the checked path (§2.7.1 item 2): linted at
-        build time, never screened at runtime."""
-        text, _used = templates.render(template_id, slots or {})
+        build time; free-text slot values are validated against
+        registry-backed facts at construction (lane3 H1)."""
+        slots = dict(slots or {})
+        if template_id in self._FREE_TEXT_TEMPLATES and \
+                slots.get("summary"):
+            ok, offenders = self._summary_backed(slots["summary"],
+                                                 job_id)
+            if not ok:
+                self.emit("template_slot_withheld",
+                          template_id=template_id, job_id=job_id,
+                          offenders=[f"{t}:{c}" for t, c in offenders])
+                fallback = self._WITHHELD_FALLBACK.get(
+                    template_id, "T-RESULT-BRIEF")
+                return self.template_segment(
+                    fallback, {"label": slots.get("label", "that")},
+                    job_id=job_id)
+        text, _used = templates.render(template_id, slots)
         return ScreenedSegment(
-            ScreenedSegment._KEY, text, "template",
+            _SEGMENT_KEY, text, "template",
             template_id=template_id, job_id=job_id,
             snapshot_version=self.S0_version)
 
@@ -804,6 +897,9 @@ def lint_templates():
         "T-CANCEL-ASKING": {"C3a"},
         "T-CANCEL-CONFIRMED": {"C3a", "C3b"},
         "T-DISPATCH-FAILED": set(), "T-GUARD-DONE": {"C3b"},
+        # completion predicate for a registry-DONE job, same class
+        # as T-GUARD-DONE; rendered only for DONE obligations.
+        "T-RESULT-BRIEF": {"C3b"},
         # "I'll tell you when it's done" is a registry-backed
         # notification promise, only spoken for real tracked jobs.
         "T-GUARD-QUEUED": {"C3a"}, "T-GUARD-RUNNING": {"C3a"},

@@ -10,11 +10,11 @@ import asyncio
 import json
 import sys
 
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 from cdp import Chrome, read_token  # noqa: E402
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "https://your-mac.your-tailnet.ts.net:8443"
-WAV = "/path/to/hermes-voice/tests/mob_chat_loop.wav"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "https://ais-mac-studio.tail3b031e.ts.net:8443"
+WAV = "/Users/ai/workspace/hermes-voice/tests/mob_chat_loop.wav"
 
 LOG_JS = "document.getElementById('log').textContent"
 STATE_JS = """(() => ({

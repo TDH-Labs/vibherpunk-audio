@@ -1,7 +1,7 @@
 """Phase 1b — content-verifiable work completion.
 
 The Phase 1 run proved the completion mechanism (worker's SPOKEN SUMMARY
-injected verbatim) but the fact I asserted (the user's city) is not in Hermes'
+injected verbatim) but the fact I asserted (Adam's city) is not in Hermes'
 memory — the worker honestly reported no record. This re-run uses a fact
 verifiable from disk: the first line of ~/.hermes/SOUL.md contains
 "built by Nous Research". The worker must read the file with its tools;
@@ -16,7 +16,7 @@ import numpy as np
 import scipy.io.wavfile
 from scipy.signal import resample_poly
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 from pipecat.frames.frames import EndFrame, InputAudioRawFrame, StartFrame
 from pipecat.pipeline.runner import PipelineRunner

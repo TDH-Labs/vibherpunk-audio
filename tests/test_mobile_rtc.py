@@ -18,14 +18,14 @@ import urllib.request
 import numpy as np
 import scipy.io.wavfile
 
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 from rtc_client import connect, http_session, read_token  # noqa: E402
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "https://your-mac.your-tailnet.ts.net:8443"
-WAV = "/path/to/hermes-voice/tests/rtc_chat2turn.wav"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "https://ais-mac-studio.tail3b031e.ts.net:8443"
+WAV = "/Users/ai/workspace/hermes-voice/tests/rtc_chat2turn.wav"
 SPEECH_ENDS = [2.16, 12.16]
-REPLY_WAV = "/path/to/hermes-voice/tests/rtc_reply.wav"
-REPLY_TRIM = "/path/to/hermes-voice/tests/rtc_reply_trim.wav"
+REPLY_WAV = "/Users/ai/workspace/hermes-voice/tests/rtc_reply.wav"
+REPLY_TRIM = "/Users/ai/workspace/hermes-voice/tests/rtc_reply_trim.wav"
 
 
 def session_flush(base, token):

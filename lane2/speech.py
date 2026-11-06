@@ -34,6 +34,11 @@ P_HELD = 5
 P_CHATTER = 6
 
 
+async def _empty_stream():
+    return
+    yield  # pragma: no cover - makes this an async generator
+
+
 def segment_priority(kind):
     return {
         "cancel_confirm": P_CANCEL_CONFIRM,
@@ -101,6 +106,10 @@ class BenchSpeaker:
         self.busy_until = None
 
     async def speak(self, seg, screened_at, wall):
+        from .screen import ScreenedSegment
+        if not isinstance(seg, ScreenedSegment):
+            raise TypeError(
+                "BenchSpeaker accepts ScreenedSegment only")
         now = time.monotonic()
         start = now if self.busy_until is None else \
             max(now, self.busy_until)
@@ -153,11 +162,9 @@ class SpeechSequencer:
         """Map a screen verdict to 0..n segments. FALLBACK/KILL are
         returned as control signals via the second tuple element."""
         if action == "PASS":
-            from .screen import ScreenedSegment
-            seg = ScreenedSegment(
-                ScreenedSegment._KEY, payload, "generated",
-                snapshot_version=self.screen.S0_version)
-            return [seg], None
+            # the screen mints PASS segments (lane3 H2 — nothing
+            # outside screen.py touches the minting key)
+            return [self.screen.pass_segment(payload)], None
         if action == "DROP":
             return [], None
         if action in ("REPLACE", "FALLBACK"):
@@ -238,17 +245,34 @@ class SpeechSequencer:
                     turn_type=generation["profile"], jobs=jobs,
                     session_id=self.session_id, p_status=ps)
                 if gv["action"] in ("DRAFT", "BLOCK"):
+                    # H6 (lane3): the guard's decision was made from
+                    # the snapshot taken when the sentence arrived;
+                    # playback may be a full slice later. Re-check
+                    # against a FRESH snapshot at play time — a job
+                    # that completed in between must not be announced
+                    # as still running.
+                    job = gv["job"] or {}
+                    jobs_now, _f = jobs_snapshot_fn()
+                    decision, tid2, slots2 = self.guard.recheck(
+                        job=job, jobs_now=jobs_now)
+                    if decision == "DROP":
+                        counters["dropped"] += 1
+                        return
                     seg = self.screen.template_segment(
-                        gv["template_id"], gv["slots"],
-                        job_id=(gv["job"] or {}).get("job_id"))
+                        tid2 or gv["template_id"],
+                        slots2 or gv["slots"],
+                        job_id=job.get("job_id"))
                     await play(seg, now_fn())
                     counters["replaced"] += 1
                     return
                 if gv["action"] == "DROP":
                     counters["dropped"] += 1
                     return
-                t_scr = now_fn()
                 action, payload = self.screen.screen_sentence(sentence)
+                # stamp AFTER screening runs (lane3 H2: v2 stamped
+                # before, so "screened_at <= play_start" certified a
+                # check that had not happened yet)
+                t_scr = now_fn()
                 if action != "PASS":
                     counters["replaced" if action == "REPLACE"
                              else "dropped"] += 1
@@ -285,9 +309,24 @@ class SpeechSequencer:
                     ob = self._pending_weave.pop(0)
                     await play(self._template_seg(ob), now_fn())
 
-            stream = self.talker.stream(generation["messages"])
+            if generation.get("draft_text"):
+                # Lane3 B: anticipator draft as the candidate
+                # generation. Same per-sentence path as talker
+                # output — guard first, then the §2.7 screen; a
+                # draft sentence that fails either is dropped or
+                # replaced exactly like generated text.
+                for sentence in splitter.feed(generation["draft_text"]):
+                    await handle_sentence(sentence)
+                    if end_gen or self._cancelled:
+                        break
+                if not end_gen and not self._cancelled:
+                    for sentence in splitter.flush():
+                        await handle_sentence(sentence)
+                stream = None
+            else:
+                stream = self.talker.stream(generation["messages"])
             try:
-                async for item in stream:
+                async for item in (stream or _empty_stream()):
                     if self._cancelled or end_gen:
                         break
                     # TalkerClient yields (delta, None) chunks and a

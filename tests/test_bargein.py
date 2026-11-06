@@ -8,7 +8,7 @@ Protocol: ask for a LONG story; once TTS audio is flowing, inject real
 speech (tests/known.wav resampled to 16 kHz) as InputAudioRawFrames.
 Measure: speech-start -> last TTS audio frame out, and whether an
 InterruptionFrame propagated. SIMULATED — no transport/speaker in the loop;
-the live perceived figure is the user's test.
+the live perceived figure is Adam's test.
 """
 import asyncio
 import json

@@ -3,7 +3,7 @@ import os
 import sys
 
 os.environ.setdefault("HERMES_VOICE_LOGDIR", "/tmp/hv-sleep-matcher-logs")
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 from hermes_voice import is_sleep_command  # noqa: E402
 
 SHOULD_SLEEP = [
@@ -36,7 +36,7 @@ SHOULD_NOT = [
     "listening",
     "sleep",
     "What is the capital of France?",
-    "Please have Hermes check its memory and tell me what city the user lives in",
+    "Please have Hermes check its memory and tell me what city Adam lives in",
     "",
     "go",
     "Stop",

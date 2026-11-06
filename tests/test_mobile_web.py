@@ -19,12 +19,12 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 from cdp import Chrome, read_token, session_events  # noqa: E402
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "https://your-mac.your-tailnet.ts.net:8443"
-WAV = sys.argv[2] if len(sys.argv) > 2 else "/path/to/hermes-voice/tests/mob_chat_loop.wav"
-OUT_WEBM = "/path/to/hermes-voice/tests/mob_reply.webm"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "https://ais-mac-studio.tail3b031e.ts.net:8443"
+WAV = sys.argv[2] if len(sys.argv) > 2 else "/Users/ai/workspace/hermes-voice/tests/mob_chat_loop.wav"
+OUT_WEBM = "/Users/ai/workspace/hermes-voice/tests/mob_reply.webm"
 
 RECORD_JS = """
 (() => {

@@ -10,14 +10,14 @@ import sys
 import time
 import wave
 
-sys.path.insert(0, "/path/to/hermes-voice")
-sys.path.insert(0, "/path/to/hermes-voice/tests")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice/tests")
 
 import os
 
 os.environ.setdefault("HERMES_WAKE", "off")
 os.environ.setdefault("HERMES_VOICE_LOGDIR",
-                      "/path/to/hermes-voice/logs-mobile")
+                      "/Users/ai/workspace/hermes-voice/logs-mobile")
 
 import numpy as np  # noqa: E402
 from pipecat.frames.frames import InputAudioRawFrame  # noqa: E402
@@ -27,7 +27,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport  # noq
 import mobile_server as ms  # noqa: E402
 import hermes_voice as hv  # noqa: E402
 
-WAV = "/path/to/hermes-voice/tests/mob_chat_loop.wav"
+WAV = "/Users/ai/workspace/hermes-voice/tests/mob_chat_loop.wav"
 
 
 class _FakeConn:

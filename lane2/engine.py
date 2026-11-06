@@ -52,15 +52,16 @@ _STATE_MAP = {
 
 
 def closed_value(text):
+    """Lane3 H4: a closed-set reply counts only as an EXACT match,
+    at certainty. v2's prefix rule scored "yes and also cancel the
+    other thing" as a 0.8 yes — exactly P_CLOSED_MIN, i.e. compound
+    utterances could affirm a side-effecting action. Anything that
+    is not exactly a closed-set member is not a confirm reply."""
     t = " ".join(re.findall(r"[a-z']+", (text or "").lower())).strip()
     if t in _YES:
-        return "yes", 0.95
+        return "yes", 1.0
     if t in _NO:
-        return "no", 0.95
-    if t.startswith("yes") and len(t.split()) <= 3:
-        return "yes", 0.8
-    if t.startswith("no") and len(t.split()) <= 3:
-        return "no", 0.8
+        return "no", 1.0
     return None, 0.0
 
 
@@ -78,7 +79,7 @@ class LaneEngine:
     def __init__(self, *, session_id, registry, context, ledger, memo,
                  talker, screen, guard, decider, emit,
                  entity_fn=None, embedder=None, executor=None,
-                 lookup_fn=None):
+                 lookup_fn=None, p_status_fn=None, anticipator=None):
         self.session_id = session_id
         self.reg = registry
         self.log = context
@@ -90,6 +91,13 @@ class LaneEngine:
         self.decider = decider
         self.emit = emit
         self.entity_fn = entity_fn
+        # H6 (lane3): per-utterance status probability for the guard
+        # recovery path; None disables the probabilistic input (the
+        # deterministic status_shape still applies).
+        self.p_status_fn = p_status_fn
+        # Lane3 B: LFM3-Audio anticipator client (advisory drafts);
+        # None = lane runs draftless, exactly as v2.
+        self.anticipator = anticipator
         self.seq = 0
         self.turn = 0
         self.outbox = []            # Obligations awaiting speech
@@ -141,10 +149,15 @@ class LaneEngine:
                 continue
             import json as _json
             spec = _json.loads(r["task_spec"] or "{}")
+            # labels that reach the guard/screen paths are sanitized
+            # exactly like the arbiter's spoken labels (v2 canary
+            # fix); the guard path used raw spec text before (H6).
+            from .arbiter import sanitize_label
             out.append({
                 "task_id": r["job_id"], "job_id": r["job_id"],
-                "task_label": (spec.get("obj") or spec.get("text")
-                               or r.get("title") or "that")[:40],
+                "task_label": sanitize_label(
+                    spec.get("obj") or spec.get("text")
+                    or r.get("title") or "that"),
                 "intent_class": spec.get("verb", ""),
                 "state": st, "registry_state": r["status"],
                 "eta_hint": None, "failure_code": r.get("failure_code"),
@@ -257,12 +270,35 @@ class LaneEngine:
         turn_id = self.turn
         result = {"turn": turn_id, "route": None, "played": [],
                   "counters": {}}
+        # Lane3 B: pull the anticipator's latest draft (<=150 ms,
+        # draftless on any failure). Advisory only — recorded with
+        # the arbiter, measured against the real route below, and
+        # used solely as a screened candidate generation.
+        draft_rec = None
+        if self.anticipator is not None:
+            try:
+                draft_rec = await self.anticipator.get_draft()
+            except Exception:
+                draft_rec = None
+        result["anticipation"] = draft_rec
         try:
             # held results first after a sleep/disconnect gap
             pre_obs = []
             if not self._started:
                 await self.start()
             held = self.arbiter.held_results()
+            # H6 (lane3): the guard's D.2 recovery was designed but
+            # never called in production — a user asking about a job
+            # IS the legitimate topic change. Note it every turn.
+            try:
+                ps = None
+                if self.p_status_fn is not None:
+                    ps = self.p_status_fn(text)
+                self.guard.note_status_like_utterance(
+                    user_text=text, p_status=ps,
+                    jobs=self._task_rows())
+            except Exception:
+                pass  # recovery is advisory; never break a turn
             if held:
                 self.arbiter.set_client_awake(True)
                 # the wake announcement below speaks these from the
@@ -336,6 +372,16 @@ class LaneEngine:
                     else:
                         await self.arbiter.on_directive(d)
             result["route"] = route
+            if draft_rec is not None:
+                self.arbiter.note_anticipation(
+                    turn_id, draft_rec.get("route"),
+                    draft_rec.get("draft") or "")
+                self.emit(
+                    "anticipation_route_check", turn_id=turn_id,
+                    suggested=draft_rec.get("route"),
+                    actual=(route or {}).get("decision"),
+                    agree=(draft_rec.get("route")
+                           == (route or {}).get("decision")))
             # 2) register dispatch canaries for new jobs
             self._register_canaries()
             # 3) plan: obligations + generation when conversational
@@ -381,6 +427,15 @@ class LaneEngine:
                           expected_cacheable=meta["expected_cacheable"])
                 generation = {"messages": prompt_b.decode("utf-8"),
                               "profile": profile}
+                # Lane3 B: on plain ANSWER turns the anticipator's
+                # draft may serve as the candidate generation — it
+                # still passes the guard + §2.7 screen sentence by
+                # sentence inside the sequencer. Never on lookup
+                # turns (the draft cannot know lookup results).
+                if decision == "answer" and not self._lookup_facts \
+                        and draft_rec is not None:
+                    generation["draft_text"] = draft_rec["draft"]
+                    self.emit("anticipation_used", turn_id=turn_id)
             return await self._speak_plan(
                 turn_id, obs, generation, speaker, sequencer_factory,
                 text, result, turn_t0=turn_t0)
@@ -434,9 +489,13 @@ class LaneEngine:
         if self.log.history_tokens() > 2110:
             self.log.evict_if_needed()
             self._schedule_warm()
-        # mark held announced for held obligations actually played
+        # mark held announced ONLY for held obligations actually
+        # played (lane3 H5, loss direction: v2 marked every held
+        # obligation in the plan, so a cancelled/faulted plan lost
+        # the result silently while the registry said announced)
         for o in obligations:
-            if o["kind"] == "held" and o.get("job_id"):
+            if o["kind"] == "held" and o.get("job_id") and \
+                    (o["template_id"], o.get("job_id")) in played_keys:
                 await self.arbiter.mark_announced(o["job_id"])
         return result
 
@@ -488,7 +547,19 @@ class LaneEngine:
             speaker=speaker,
             jobs_snapshot_fn=lambda: (self._task_rows(), []),
             p_status=None)
+        played_keys = {(r.get("template_id"), r.get("job_id"))
+                       for r in res["played"]}
         for o in obs:
-            if o["kind"] == "held" and o.get("job_id"):
-                await self.arbiter.mark_announced(o["job_id"])
+            od = o if isinstance(o, dict) else None
+            if od is None:
+                continue
+            # confirm windows start at playback on this path too
+            if od.get("arb_kind") in ("confirm_prompt", "dup_confirm") \
+                    and (od["template_id"], od.get("job_id")) \
+                    in played_keys:
+                self.arbiter.confirm_prompt_spoken(od["job_id"])
+            # H5: only played held obligations are marked announced
+            if od["kind"] == "held" and od.get("job_id") and \
+                    (od["template_id"], od.get("job_id")) in played_keys:
+                await self.arbiter.mark_announced(od["job_id"])
         return res

@@ -26,7 +26,7 @@ TOOLS = [
 
 SYSTEM = (
     "You are Hermes, a voice assistant. Short spoken replies. For anything "
-    "needing the user's real data, memory, files, or multi-step work, call "
+    "needing Adam's real data, memory, files, or multi-step work, call "
     "delegate_to_hermes instead of answering yourself."
 )
 
@@ -39,7 +39,7 @@ async def main():
         **kw,
     )
     for label, user in [
-        ("WORK", "Please have Hermes check its memory and tell me what city the user lives in."),
+        ("WORK", "Please have Hermes check its memory and tell me what city Adam lives in."),
         ("CHAT", "What is the capital of France?"),
     ]:
         stream = await client.chat.completions.create(

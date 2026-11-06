@@ -15,7 +15,7 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, "/path/to/hermes-voice")
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import hermes_voice as hv
