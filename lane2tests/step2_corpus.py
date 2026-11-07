@@ -20,7 +20,7 @@ import random
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 from lane2 import arbiter as arb_mod  # noqa: E402
 from lane2.arbiter import Arbiter, Directive  # noqa: E402
 from lane2.executor import StubExecutor  # noqa: E402

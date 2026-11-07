@@ -18,11 +18,10 @@ Run: .venv/bin/python -m lane2tests.step6bench <out.json>
 import json
 import random
 import statistics
-import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 from lane2.embed import HashEmbedder            # noqa: E402
 from lane2.guard import TopicGuard              # noqa: E402

@@ -274,7 +274,7 @@ async def run_session(session, tok, extractor, db_path):
     ledger = FactLedger(extractor)
     memo = MemoState(reg, ledger, session_id=session["id"])
     memo.bind_tokenizer(tok)
-    log = SessionLog(tok, {"user": "User"}, memo=memo)
+    log = SessionLog(tok, {"user": "Adam"}, memo=memo)
     turn = 0
     targets = []
 

@@ -1,7 +1,7 @@
 /* Vibherpunk Audio — shell cache only. API/WebRTC traffic is never cached.
    STANDING RULE: any change under client/ MUST bump CACHE below, or
    installed devices keep serving the stale shell (see RUNBOOK-mobile.md). */
-const CACHE = "vibherpunk-audio-v7";
+const CACHE = "vibherpunk-audio-v14";
 const SHELL = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (ev) => {
@@ -19,6 +19,9 @@ self.addEventListener("activate", (ev) => {
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (url.pathname.startsWith("/api/") || ev.request.method !== "GET") return;
+  // Avatar videos stream straight from the network: never cache them and
+  // never intercept their range requests.
+  if (url.pathname.startsWith("/avatar-") && url.pathname.endsWith(".mp4")) return;
   // Documents are network-first: a client fix must reach devices on the next
   // load, not whenever a cache entry happens to expire. The precached shell
   // is only the offline fallback. Static assets stay cache-first.

@@ -9,7 +9,7 @@ your mic → local Whisper (what you said) → Hermes (the brain, trimmed
 Open Terminal on the Mac Studio and paste this one line:
 
 ```
-cd ~/workspace/hermes-voice && API_SERVER_KEY=$(grep '^API_SERVER_KEY' ~/.hermes/profiles/voice/.env | head -1 | cut -d= -f2- | tr -d '"') .venv/bin/python hermes_voice.py
+cd /Users/ai/workspace/hermes-voice && API_SERVER_KEY=$(grep '^API_SERVER_KEY' ~/.hermes/profiles/voice/.env | head -1 | cut -d= -f2- | tr -d '"') .venv/bin/python hermes_voice.py
 ```
 
 Wait ~15 seconds after you run it — the speech models load first

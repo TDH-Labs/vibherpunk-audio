@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, "/Users/ai/workspace/hermes-voice")
 
 from lane2.context import SessionLog, Tokenizer          # noqa: E402
 from lane2.embed import HashEmbedder                    # noqa: E402
@@ -34,7 +34,7 @@ from lane2.speech import BenchSpeaker, SpeechSequencer   # noqa: E402
 from lane2.talker import TalkerClient                    # noqa: E402
 import hermes_voice as hv                                # noqa: E402
 
-PINS = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lane2", "pins.json")))
+PINS = json.load(open("/Users/ai/workspace/hermes-voice/lane2/pins.json"))
 TALKER_URL = os.environ.get("LANE2_BASE", "http://127.0.0.1:8123/v1")
 TALKER_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
@@ -99,7 +99,7 @@ def make_engine(ctx, session_id, db, executor):
     ledger = FactLedger(ctx.extractor, emit=ctx.emit)
     memo = MemoState(reg, ledger, session_id=session_id, emit=ctx.emit)
     memo.bind_tokenizer(ctx.tok)
-    log = SessionLog(ctx.tok, {"user": "User"}, memo=memo, emit=ctx.emit)
+    log = SessionLog(ctx.tok, {"user": "Adam"}, memo=memo, emit=ctx.emit)
     log.retain_hook = lambda u: any(
         (r := reg.get(j)) is not None and r["status"] not in (
             "DONE", "FAILED", "CANCELLED", "DISPATCH_FAILED", "MERGED")
@@ -291,7 +291,7 @@ class CanonicalRecorder:
         directives, jobs = [], []
         try:
             sys.path.insert(
-                0, os.path.dirname(os.path.abspath(__file__)))
+                0, "/Users/ai/workspace/hermes-voice/lane2tests")
             from bench_harness import adapters
             # events_spine.jsonl stays byte-faithful to the lane's
             # spine (lowercase directive kinds); the canonical
@@ -787,6 +787,11 @@ def evaluate(stats, tier):
             n_ad += 1
             if got == "delegate":
                 mis_ad += 1
+    # H3 (lane3): the silent-dispatch-failure counter must be final
+    # BEFORE the zero-tolerance gate reads stats.zero — v2 computed
+    # it after the gates, so the gate certified a stale zero.
+    stats.zero["silent_dispatch_failure"] = max(
+        0, stats.df_events - stats.df_spoken)
     out = {
         "turns": stats.turns, "delegate_steps": stats.delegate_steps,
         "chat_median_ms": chat_med, "chat_p90_ms": chat_p90,
@@ -816,8 +821,6 @@ def evaluate(stats, tier):
         }
     out["dispatch_failed_events"] = stats.df_events
     out["dispatch_failed_spoken"] = stats.df_spoken
-    stats.zero["silent_dispatch_failure"] = max(
-        0, stats.df_events - stats.df_spoken)
     out["zero_tolerance"] = stats.zero
     out["gates"] = gates
     out["PASS"] = all(gates.values()) if gates else None
@@ -852,7 +855,7 @@ async def run_tier1(run_idx):
               f"turns={stats.turns}", flush=True)
     out = evaluate(stats, "tier1")
     if RECORDER:
-        RECORDER.write(os.path.dirname(os.path.abspath(__file__)) + "/"
+        RECORDER.write("/Users/ai/workspace/hermes-voice/lane2tests/"
                        f"runs/tier1_run{run_idx}")
     return out
 
@@ -918,7 +921,7 @@ async def run_tier2():
     }
     out["PASS"] = all(out["factor_gates"].values())
     if RECORDER:
-        RECORDER.write(os.path.dirname(os.path.abspath(__file__)) + "/"
+        RECORDER.write("/Users/ai/workspace/hermes-voice/lane2tests/"
                        "runs/tier2")
     return out
 
@@ -945,7 +948,7 @@ async def run_mini():
         print(f"[mini {block.__name__}] {time.monotonic() - t0:.1f}s "
               f"turns={stats.turns}", flush=True)
     if RECORDER:
-        d = RECORDER.write(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/"
+        d = RECORDER.write("/Users/ai/workspace/hermes-voice/"
                            "lane2tests/runs/mini_canonical")
         print("CANONICAL_DIR", d)
     out = evaluate(stats, "tier1")

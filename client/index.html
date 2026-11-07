@@ -75,34 +75,48 @@
     gap: 10px;
   }
 
-  .avatar-face {
+  /* Animated avatar: one ambient generated loop of the dog in a round
+     stage. It does not follow the conversation (Adam, 2026-11-06) — it
+     just loops. The still portrait is the base layer, so any failure
+     to load the clip falls back to the still dog. */
+  .avatar-stage {
+    position: relative;
     width: min(56vw, 216px);
     height: min(56vw, 216px);
     border-radius: 50%;
-    object-fit: cover;
+    overflow: hidden;
+    flex-shrink: 0;
     box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.28), 0 24px 48px -12px rgba(0, 0, 0, 0.55);
-    animation: avatar-breathe 5s ease-in-out infinite;
+    transition: box-shadow 300ms ease;
   }
 
-  @keyframes avatar-breathe {
-    0%, 100% { transform: scale(1); }
-    50% { transform: scale(1.03); }
+  .avatar-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
-  @keyframes avatar-glow {
-    0%, 100% { box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.30), 0 0 34px rgba(111, 227, 174, 0.45), 0 24px 48px -12px rgba(0, 0, 0, 0.55); }
-    50% { box-shadow: 0 0 0 7px rgba(255, 255, 255, 0.42), 0 0 58px rgba(111, 227, 174, 0.75), 0 24px 48px -12px rgba(0, 0, 0, 0.55); }
+  video.avatar-layer {
+    opacity: 0;
+    transition: opacity 900ms ease;
   }
 
-  /* Connected and talking or listening: a clearly visible pulse. */
-  .chassis:has(#status.live) .avatar-face {
-    animation: avatar-breathe 1.5s ease-in-out infinite, avatar-glow 1.5s ease-in-out infinite;
+  /* One loop, played through an A/B copy pair: the two copies crossfade
+     into each other at the loop point, so there is never a jump. */
+  .avatar-stage video.pair-loop.active {
+    opacity: 1;
   }
 
-  /* Thinking or working: slower, softer sway. */
-  .chassis:has(#status.busy) .avatar-face {
-    animation: avatar-breathe 2.8s ease-in-out infinite;
-    filter: saturate(1.12);
+  /* Connected: a soft living glow around the ring. */
+  .chassis:has(#status.live) .avatar-stage {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.34), 0 0 42px rgba(111, 227, 174, 0.45), 0 24px 48px -12px rgba(0, 0, 0, 0.55);
+  }
+
+  /* Thinking or working: warmer ring. */
+  .chassis:has(#status.busy) .avatar-stage {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.30), 0 0 36px rgba(245, 176, 75, 0.40), 0 24px 48px -12px rgba(0, 0, 0, 0.55);
   }
 
   .hero h1 {
@@ -501,13 +515,19 @@
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
     }
+    /* Reduced motion: show the still portrait, never the clips. */
+    .avatar-stage video { display: none; }
   }
 </style>
 </head>
 <body>
   <main class="chassis">
     <section class="hero">
-      <img class="avatar-face" src="avatar.png" alt="Vibherpunk">
+      <div class="avatar-stage" id="avatarStage">
+        <img class="avatar-layer" src="avatar.png" alt="Vibherpunk">
+        <video class="avatar-layer pair-loop" id="vidLoopA" src="avatar-silent.mp4" muted playsinline autoplay preload="auto" poster="avatar.png" aria-hidden="true"></video>
+        <video class="avatar-layer pair-loop" id="vidLoopB" src="avatar-silent.mp4" muted playsinline preload="auto" poster="avatar.png" aria-hidden="true"></video>
+      </div>
       <h1>Vibherpunk</h1>
       <div class="status-line">
         <span class="signal-led" aria-hidden="true"></span>
@@ -660,9 +680,61 @@ let pc = null, localStream = null, remoteStream = null;
 let pcId = null, iceBuffer = [];
 let audioCtx = null, micAnalyser = null, botAnalyser = null, rafId = null;
 let lastMicSpeechAt = 0, botSpeaking = false, jobRunning = false;
+let lastBotAudioAt = 0;
 let muted = false;
 let serverSpeaking = false;
 let botGain = null;
+
+// ---- animated avatar: one ambient loop of the dog. It does NOT
+// follow the conversation (Adam, 2026-11-06: "just a loop of the
+// animated dog — don't try to solve speech and responsiveness").
+// The loop plays through an A/B copy pair: the copies crossfade into
+// each other at the loop point, so there is never a jump.
+function makeLoopPair(aId, bId) {
+  const vids = [$(aId), $(bId)].filter(Boolean);
+  if (vids.length !== 2) return null;
+  const pair = { vids, active: 0, fading: false };
+  const FADE_S = 0.9;
+  vids[0].classList.add("active");
+  function tick() {
+    if (pair.fading) return;
+    const cur = vids[pair.active], nxt = vids[1 - pair.active];
+    if (!cur.duration || cur.currentTime < cur.duration - FADE_S - 0.05) return;
+    pair.fading = true;
+    nxt.currentTime = 0;
+    nxt.play().catch(() => {});
+    nxt.classList.add("active");
+    cur.classList.remove("active");
+    setTimeout(() => {
+      cur.pause();
+      pair.active = 1 - pair.active;
+      pair.fading = false;
+    }, FADE_S * 1000);
+  }
+  vids.forEach((v) => {
+    v.addEventListener("timeupdate", tick);
+    // A copy that cannot load hides itself; the still portrait stays beneath.
+    v.addEventListener("error", () => { v.style.display = "none"; }, true);
+  });
+  pair.kick = () => {
+    const cur = vids[pair.active];
+    if (cur && cur.paused) cur.play().catch(() => {});
+  };
+  return pair;
+}
+const loopPair = makeLoopPair("vidLoopA", "vidLoopB");
+const avatarStageEl = $("avatarStage");
+// The avatar no longer reacts to speech. setAvatarMode remains as a
+// no-op because the conversation loop still calls it.
+function setAvatarMode(next) { }
+// Autoplay can be blocked on the phone (data saver / battery saver),
+// which leaves the clip parked on its poster with a play button. Any
+// tap on the page, and every Talk tap, kicks the loop directly.
+function kickAvatarLoop() {
+  if (loopPair) loopPair.kick();
+}
+document.addEventListener("pointerdown", kickAvatarLoop);
+if (avatarStageEl) avatarStageEl.addEventListener("click", kickAvatarLoop);
 
 // ---- screen wake lock: mobile browsers suspend the page when the screen
 // locks, which kills the WebRTC session mid-conversation. While a session
@@ -754,6 +826,7 @@ function meterLoop() {
   if (mic > 0.04) lastMicSpeechAt = now;
   const wasSpeaking = botSpeaking;
   botSpeaking = bot > 0.02;
+  if (botSpeaking) lastBotAudioAt = now;
   if (botSpeaking && !wasSpeaking && !debug.firstRemoteAudioAt) {
     debug.firstRemoteAudioAt = now; mark("first_remote_audio");
     debug.speechEndBeforeReply = lastMicSpeechAt;
@@ -764,6 +837,10 @@ function meterLoop() {
     else if (now - lastMicSpeechAt < 1200 && lastMicSpeechAt > 0) setStatus("Listening — you are speaking", "live");
     else if (lastMicSpeechAt > 0 && now - lastMicSpeechAt >= 1200 && !botSpeaking && debug.lastUserTurnAt && now - debug.lastUserTurnAt < 6000) setStatus("Thinking…", "busy");
     else setStatus("Listening", "live");
+    // Face follows the conversation: talking while she speaks (the
+    // server flag covers the whole utterance; the 500 ms audio tail
+    // keeps the mode from flapping at phrase boundaries).
+    setAvatarMode(serverSpeaking || now - lastBotAudioAt < 500 ? "talking" : "silent");
   }
   rafId = requestAnimationFrame(meterLoop);
 }
@@ -782,6 +859,7 @@ async function patchCandidates(cands) {
 async function connect() {
   if (pc) { disconnect(); return; }
   if (!token()) { setStatus("Missing access token — open the full URL from the runbook", "error"); return; }
+  kickAvatarLoop();
   connectBtn.disabled = true;
   setStatus("Connecting…", "busy");
   debug.connectStartedAt = performance.now(); mark("connect_tap");
@@ -930,6 +1008,8 @@ function teardownUi() {
   if (clockEl) clockEl.textContent = "00:00.0";
   if (waveBars.length) waveBars.forEach((b) => { b.style.height = "4px"; });
   setStatus("Disconnected", "");
+  serverSpeaking = false;
+  setAvatarMode("silent");
 }
 
 function disconnect() {

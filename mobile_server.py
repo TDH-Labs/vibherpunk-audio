@@ -496,6 +496,72 @@ async def avatar():
     return FileResponse(CLIENT_DIR / "avatar.png", media_type="image/png")
 
 
+@app.get("/avatar-loop.mp4")
+async def avatar_loop():
+    return FileResponse(
+        CLIENT_DIR / "avatar-loop.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/avatar-silent.mp4")
+async def avatar_silent():
+    return FileResponse(
+        CLIENT_DIR / "avatar-silent.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/avatar-speech.mp4")
+async def avatar_speech():
+    return FileResponse(
+        CLIENT_DIR / "avatar-speech.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/mouth-{letter}.jpg")
+async def mouth_frame(letter: str):
+    # Full-frame mouth shapes for the lip-sync layer (Rhubarb letters).
+    if letter not in ("x", "a", "b", "c", "d", "e", "f", "g", "h"):
+        return FileResponse(CLIENT_DIR / "avatar.png", media_type="image/png")
+    return FileResponse(
+        CLIENT_DIR / f"mouth-{letter}.jpg",
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/avatar-idle.mp4")
+async def avatar_idle():
+    return FileResponse(
+        CLIENT_DIR / "avatar-idle.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/avatar-talking.mp4")
+async def avatar_talking():
+    return FileResponse(
+        CLIENT_DIR / "avatar-talking.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/avatar-listening.mp4")
+async def avatar_listening():
+    return FileResponse(
+        CLIENT_DIR / "avatar-listening.mp4",
+        media_type="video/mp4",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/apple-touch-icon.png")
 async def apple_icon():
     return FileResponse(CLIENT_DIR / "icon-192.png", media_type="image/png")
